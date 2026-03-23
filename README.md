@@ -60,4 +60,4 @@ Each folder contains its own scripts and, where applicable, example input/output
 
 ## Contact
 
-For questions about this repository, please contact the Rashid Lab.
+For questions about this repository, please contact Galen O'Shea-Stone @ galenoshea@gmail.com
