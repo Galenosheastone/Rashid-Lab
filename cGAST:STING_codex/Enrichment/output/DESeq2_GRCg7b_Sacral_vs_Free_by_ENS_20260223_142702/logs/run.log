@@ -1,0 +1,280 @@
+
+====== SUMMARY ======
+Input genes: 12227
+Mapped genes: 12360
+Unmapped: -133
+Universe: 12090
+Test set: 3927 (32.5%)
+Warning in gzfile(file, "wb") :
+  cannot open compressed file '/Users/galen2/.local/share/rstudio/notebooks/23414252-Enrichment_Pipeline_v8.0/1/C8783BFF440edc53/csetup_chunk_t/33c3c927164949ba8f4f139e3abb7edf.snapshot', probable reason 'No such file or directory'
+Error in gzfile(file, "wb") : cannot open the connection
+null device 
+          1 
+Warning in gzfile(file, "wb") :
+  cannot open compressed file '/Users/galen2/.local/share/rstudio/notebooks/23414252-Enrichment_Pipeline_v8.0/1/C8783BFF440edc53/csetup_chunk_t/f1094de9e1ad49d9929974aa6185f672.snapshot', probable reason 'No such file or directory'
+Error in gzfile(file, "wb") : cannot open the connection
+Warning in gzfile(file, "wb") :
+  cannot open compressed file '/Users/galen2/.local/share/rstudio/notebooks/23414252-Enrichment_Pipeline_v8.0/1/C8783BFF440edc53/csetup_chunk_t/8b186bbc3a39483ab9aeb1720db7e87d.snapshot', probable reason 'No such file or directory'
+Error in gzfile(file, "wb") : cannot open the connection
+null device 
+          1 
+Warning in gzfile(file, "wb") :
+  cannot open compressed file '/Users/galen2/.local/share/rstudio/notebooks/23414252-Enrichment_Pipeline_v8.0/1/C8783BFF440edc53/csetup_chunk_t/0fe6fece185340afb6e97b4d41c56c34.snapshot', probable reason 'No such file or directory'
+Error in gzfile(file, "wb") : cannot open the connection
+[1] "Note: 1 of 105 unique input IDs unmapped."
+[1] "Note: 1 of 46 unique input IDs unmapped."
+[1] "Note: 2 of 53 unique input IDs unmapped."
+[1] "Note: 2 of 84 unique input IDs unmapped."
+[1] "Note: 1 of 73 unique input IDs unmapped."
+[1] "Note: 1 of 46 unique input IDs unmapped."
+[1] "Note: 4 of 105 unique input IDs unmapped."
+[1] "Note: 1 of 182 unique input IDs unmapped."
+
+All done.
+Run root: output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702
+Key files:
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/tables/RESULTS.xlsx
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/plots/volcano/volcano_all.pdf
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/widgets/sankey_genes_kegg.html
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/tables/signatures/hallmark_fgsea_all.xlsx
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/tables/activity/tf_activity_ulm.xlsx
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/r_objects/enrichment_objects.rds
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/logs/run.log
+  - output/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS_20260223_142702/OUTPUT_MANIFEST.csv
+Error: `path` does not exist: ‘Somite_DE_SIGNIF_only.xlsx’
+Error: 'rtpcr_somite_matrix_IMPUTED_DATA.csv' does not exist in current working directory ('/Users/galen2/Documents/Documents_Folder/Rashid_Lab/Joe_S_HOX_exp_RNAseq_data_raw.nosync/gene_enrichment/HOX_RNAseq_fig_scripts').
+
+> #!/usr/bin/env Rscript
+> 
+> # cGAS-STING pathway map from DESeq2 CSV (Gallus gallus, Ensembl IDs)
+> #
+> # How to run in RStudio:
+> # source("cgast_s ..." ... [TRUNCATED] 
+G2;H2;Warningh: package ‘tibble’ was built under R version 4.5.2g
+
+> print_help <- function() {
++   cat(
++     "Usage:\n",
++     "  Rscript cgast_sting_map.R --input <csv> [--outdir <dir>] [--title <title>]\n",
++      .... [TRUNCATED] 
+
+> parse_args <- function(args) {
++   out <- list(
++     input = NULL,
++     outdir = "cgast_sting_out",
++     title = "cGAS-STING Pathway Map",
++      .... [TRUNCATED] 
+
+> get_pathway_spec <- function() {
++   pathway_genes <- c(
++     "MB21D1", "TMEM173", "DDX41", "IFI16", "ZBP1",
++     "TRAF3", "TRAF6",
++     "TBK1",  .... [TRUNCATED] 
+
+> run_cgast_sting_map <- function(input,
++                                 outdir = "cgast_sting_out",
++                                 title = "cGAS ..." ... [TRUNCATED] 
+
+> run_cgast_sting_map_interactive <- function() {
++   message("Interactive mode: select your DESeq2 CSV.")
++   input <- tryCatch(file.choose(), error  .... [TRUNCATED] 
+
+> main <- function() {
++   parsed <- parse_args(commandArgs(trailingOnly = TRUE))
++ 
++   if (isTRUE(parsed$help)) {
++     print_help()
++     return(in .... [TRUNCATED] 
+
+> # Execute only when run as a script (not when sourced in RStudio).
+> if (sys.nframe() == 0L) {
++   main()
++ }
+
+> #!/usr/bin/env Rscript
+> 
+> # cGAS-STING pathway map from DESeq2 CSV (Gallus gallus, Ensembl IDs)
+> #
+> # How to run in RStudio:
+> # source("cgast_s ..." ... [TRUNCATED] 
+
+> print_help <- function() {
++   cat(
++     "Usage:\n",
++     "  Rscript cgast_sting_map.R --input <csv> [--outdir <dir>] [--title <title>]\n",
++      .... [TRUNCATED] 
+
+> parse_args <- function(args) {
++   out <- list(
++     input = NULL,
++     outdir = "cgast_sting_out",
++     title = "cGAS-STING Pathway Map",
++      .... [TRUNCATED] 
+
+> get_pathway_spec <- function() {
++   pathway_genes <- c(
++     "MB21D1", "TMEM173", "DDX41", "IFI16", "ZBP1",
++     "TRAF3", "TRAF6",
++     "TBK1",  .... [TRUNCATED] 
+
+> run_cgast_sting_map <- function(input,
++                                 outdir = "cgast_sting_out",
++                                 title = "cGAS ..." ... [TRUNCATED] 
+
+> run_cgast_sting_map_interactive <- function() {
++   message("Interactive mode: select your DESeq2 CSV.")
++   input <- tryCatch(file.choose(), error  .... [TRUNCATED] 
+
+> main <- function() {
++   parsed <- parse_args(commandArgs(trailingOnly = TRUE))
++ 
++   if (isTRUE(parsed$help)) {
++     print_help()
++     return(in .... [TRUNCATED] 
+
+> # Execute only when run as a script (not when sourced in RStudio).
+> if (sys.nframe() == 0L) {
++   main()
++ }
+Error: object 'parsed' not found
+
+> #!/usr/bin/env Rscript
+> 
+> # cGAS-STING pathway map from DESeq2 CSV (Gallus gallus, Ensembl IDs)
+> #
+> # How to run in RStudio:
+> # source("cgast_s ..." ... [TRUNCATED] 
+
+> print_help <- function() {
++   cat(
++     "Usage:\n",
++     "  Rscript cgast_sting_map.R --input <csv> [--outdir <dir>] [--title <title>]\n",
++      .... [TRUNCATED] 
+
+> parse_args <- function(args) {
++   out <- list(
++     input = NULL,
++     outdir = "cgast_sting_out",
++     title = "cGAS-STING Pathway Map",
++      .... [TRUNCATED] 
+
+> get_pathway_spec <- function() {
++   pathway_genes <- c(
++     "MB21D1", "TMEM173", "DDX41", "IFI16", "ZBP1",
++     "TRAF3", "TRAF6",
++     "TBK1",  .... [TRUNCATED] 
+
+> run_cgast_sting_map <- function(input,
++                                 outdir = "cgast_sting_out",
++                                 title = "cGAS ..." ... [TRUNCATED] 
+
+> run_cgast_sting_map_interactive <- function() {
++   message("Interactive mode: select your DESeq2 CSV.")
++   input <- tryCatch(file.choose(), error  .... [TRUNCATED] 
+
+> main <- function() {
++   parsed <- parse_args(commandArgs(trailingOnly = TRUE))
++ 
++   if (isTRUE(parsed$help)) {
++     print_help()
++     return(in .... [TRUNCATED] 
+
+> # Execute only when run as a script (not when sourced in RStudio).
+> if (sys.nframe() == 0L) {
++   main()
++ }
+Usage:
+  Rscript cgast_sting_map.R --input <csv> [--outdir <dir>] [--title <title>]
+
+RStudio usage:
+  source("cgast_sting_map.R")
+  run_cgast_sting_map(input = "...", outdir = "cgast_sting_out", title = "...")
+  # or
+  run_cgast_sting_map_interactive()
+Error: no function to return from, jumping to top level
+$svg
+[1] "cgast_sting_out/cgast_sting_map_SVG.svg"
+
+$png
+[1] "cgast_sting_out/cgast_sting_map_PNG.png"
+
+$nodes
+[1] "cgast_sting_out/cgast_sting_nodes.tsv"
+
+$missing
+[1] "cgast_sting_out/cgast_sting_missing_genes.tsv"
+
+$all_results
+[1] "cgast_sting_out/cgast_sting_all_results.csv"
+
+                                            svg                                             png                                           nodes 
+      "cgast_sting_out/cgast_sting_map_SVG.svg"       "cgast_sting_out/cgast_sting_map_PNG.png"         "cgast_sting_out/cgast_sting_nodes.tsv" 
+                                        missing                                     all_results 
+"cgast_sting_out/cgast_sting_missing_genes.tsv"   "cgast_sting_out/cgast_sting_all_results.csv" 
+$svg
+[1] "cgast_sting_out/cgast_sting_map_SVG.svg"
+
+$png
+[1] "cgast_sting_out/cgast_sting_map_PNG.png"
+
+$nodes
+[1] "cgast_sting_out/cgast_sting_nodes.tsv"
+
+$missing
+[1] "cgast_sting_out/cgast_sting_missing_genes.tsv"
+
+$all_results
+[1] "cgast_sting_out/cgast_sting_all_results.csv"
+
+                                            svg                                             png                                           nodes 
+      "cgast_sting_out/cgast_sting_map_SVG.svg"       "cgast_sting_out/cgast_sting_map_PNG.png"         "cgast_sting_out/cgast_sting_nodes.tsv" 
+                                        missing                                     all_results 
+"cgast_sting_out/cgast_sting_missing_genes.tsv"   "cgast_sting_out/cgast_sting_all_results.csv" 
+$svg
+[1] "cgast_sting_out/cgast_sting_map_SVG.svg"
+
+$png
+[1] "cgast_sting_out/cgast_sting_map_PNG.png"
+
+$nodes
+[1] "cgast_sting_out/cgast_sting_nodes.tsv"
+
+$missing
+[1] "cgast_sting_out/cgast_sting_missing_genes.tsv"
+
+$all_results
+[1] "cgast_sting_out/cgast_sting_all_results.csv"
+
+[1] "cgast_sting_out/cgast_sting_results_from_notebook.csv"
+                                                    svg                                                     png 
+              "cgast_sting_out/cgast_sting_map_SVG.svg"               "cgast_sting_out/cgast_sting_map_PNG.png" 
+                                                  nodes                                                 missing 
+                "cgast_sting_out/cgast_sting_nodes.tsv"         "cgast_sting_out/cgast_sting_missing_genes.tsv" 
+                                            all_results                                    notebook_results_csv 
+          "cgast_sting_out/cgast_sting_all_results.csv" "cgast_sting_out/cgast_sting_results_from_notebook.csv" 
+
+Quitting from cgast_sting_map_notebook.Rmd:44-60 [run-map]
+$svg
+[1] "cgast_sting_out/cgast_sting_map_SVG.svg"
+
+$png
+[1] "cgast_sting_out/cgast_sting_map_PNG.png"
+
+$nodes
+[1] "cgast_sting_out/cgast_sting_nodes.tsv"
+
+$missing
+[1] "cgast_sting_out/cgast_sting_missing_genes.tsv"
+
+$all_results
+[1] "cgast_sting_out/cgast_sting_all_results.csv"
+
+[1] "cgast_sting_out/cgast_sting_results_from_notebook.csv"
+                                                    svg                                                     png 
+              "cgast_sting_out/cgast_sting_map_SVG.svg"               "cgast_sting_out/cgast_sting_map_PNG.png" 
+                                                  nodes                                                 missing 
+                "cgast_sting_out/cgast_sting_nodes.tsv"         "cgast_sting_out/cgast_sting_missing_genes.tsv" 
+                                            all_results                                    notebook_results_csv 
+          "cgast_sting_out/cgast_sting_all_results.csv" "cgast_sting_out/cgast_sting_results_from_notebook.csv" 
+
+Quitting from cgast_sting_map_notebook.Rmd:44-60 [run-map]

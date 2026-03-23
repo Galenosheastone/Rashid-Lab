@@ -1,0 +1,886 @@
+---
+title: "R Notebook"
+output: none
+
+Author: Galen O'Shea-Stone
+Date: 9/30/25
+Title: HOX_GDF11_focus
+---
+
+```{r}
+# posthoc_HOX_GDF11_analysis — per-comparison refactor (FULL SCRIPT)
+# Author: Galen O'Shea-Stone (updated with per-comparison + dynamic labels)
+# Date: Sys.Date()
+#
+# What this does
+#  - Runs the same HOX (A–D) + GDF11 analyses you had, but **per comparison**
+#    (e.g., Treated_vs_Control) using the metadata labels dynamically.
+#  - Detects the grouping column automatically (uses `condition` if present;
+#    otherwise picks the first factor/character column with a small number of levels).
+#  - For each comparison, writes all outputs to:
+#        HOX_focus_output/HOX_GDF11_run_<date>_<id>/comparison_<label>/
+#  - If no DE files are found, it runs a single "ALL" analysis on all samples.
+#
+# Inputs (put these three files in `in_dir`):
+#   - normalized_counts.csv   (rows=genes, columns=samples; first column gene IDs)
+#   - coldata_used.csv        (rownames = sample IDs; includes grouping column)
+#   - gene_annotation_used.csv (must contain a 'Geneid' column; optional SYMBOL/Ensembl/NCBI columns)
+#
+# Toggle:
+#   - RUN_PER_COMPARISON <- TRUE   # per DESeq2_*_vs_*.csv comparison
+#
+# Notes:
+#   - The DE lollipop plots are tied to each DE file if it matches the comparison levels.
+#   - All figures use a consistent palette **per comparison** based on its levels.
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(pheatmap)
+  library(data.table)
+  library(stringr)
+  library(tools)
+  library(grid)
+  library(scales)   # hue_pal(), squish
+})
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# ------------------------------------------------------------------------------
+# CONFIG & FOLDERS
+# ------------------------------------------------------------------------------
+in_dir <- "deseq2_files_here"     # ← Put the three CSVs + any DESeq2_*.csv here
+new_dir <- "HOX_focus_output"
+
+date_tag <- format(Sys.Date(), "%Y%m%d")
+run_tag  <- paste0("HOX_GDF11_run_", date_tag, "_", sprintf("%04d", sample(1:9999, 1)))
+out_dir  <- file.path(new_dir, run_tag)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+cat("Saving HOX/GDF11 outputs to:", normalizePath(out_dir), "\n")
+
+# Targets & regex
+target_symbols <- c("GDF11")
+hox_regex_full <- "^(HOX)([ABCD])([0-9]+)$"
+hox_regex      <- "^HOX[ABCD][0-9]+"
+cluster_order  <- c("A","B","C","D","Other")
+groups_1_13    <- 1:13
+
+# ------------------------------------------------------------------------------
+# LOAD PRIOR OUTPUTS
+# ------------------------------------------------------------------------------
+norm_counts_file <- file.path(in_dir, "normalized_counts.csv")
+coldata_file     <- file.path(in_dir, "coldata_used.csv")
+annot_file       <- file.path(in_dir, "gene_annotation_used.csv")
+stopifnot(file.exists(norm_counts_file), file.exists(coldata_file), file.exists(annot_file))
+
+norm_counts <- data.frame(fread(norm_counts_file), check.names = FALSE)
+coldata     <- data.frame(fread(coldata_file), row.names = 1, check.names = FALSE)
+gene_annot  <- data.frame(fread(annot_file),  check.names = FALSE)
+
+stopifnot("Geneid" %in% colnames(gene_annot))
+rownames(gene_annot) <- gene_annot$Geneid
+
+# robust ID column for counts
+idcol_nc <- if ("Geneid" %in% colnames(norm_counts)) "Geneid" else
+            if ("V1" %in% colnames(norm_counts)) "V1" else
+            colnames(norm_counts)[1]
+rownames(norm_counts) <- norm_counts[[idcol_nc]]
+norm_counts[[idcol_nc]] <- NULL
+
+# align to overlapping samples
+common_samples <- intersect(colnames(norm_counts), rownames(coldata))
+if (!length(common_samples)) stop("No overlapping sample IDs between normalized_counts and coldata_used.")
+norm_counts <- norm_counts[, common_samples, drop = FALSE]
+coldata     <- coldata[common_samples, , drop = FALSE]
+
+# ensure expected annotation columns exist
+for (cn in c("SYMBOL","Ensembl_GeneID","NCBI_GeneID"))
+  if (!(cn %in% colnames(gene_annot))) gene_annot[[cn]] <- NA_character_
+
+# ------------------------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------------------------
+# Detect HOX cluster/number from symbol
+detect_cluster <- function(sym) {
+  res <- data.frame(cluster = "Other", num = NA_integer_, is_hox = FALSE)
+  if (is.na(sym) || !nzchar(sym)) return(res)
+  m <- regexec(hox_regex_full, toupper(sym)); pr <- regmatches(sym, m)[[1]]
+  if (length(pr) == 4) return(data.frame(cluster = pr[3], num = as.integer(pr[4]), is_hox = TRUE))
+  m2 <- regexec("^(HOX)([ABCD])([0-9]+)", toupper(sym)); pr2 <- regmatches(sym, m2)[[1]]
+  if (length(pr2) >= 4) return(data.frame(cluster = pr2[3], num = as.integer(pr2[4]), is_hox = TRUE))
+  res
+}
+
+# Dynamic grouping column detection
+detect_group_col <- function(cd) {
+  if ("condition" %in% names(cd)) return("condition")
+  cand <- names(cd)[sapply(cd, function(x) is.factor(x) || is.character(x))]
+  cand <- cand[sapply(cd[cand], function(x) {
+    ux <- unique(x); n <- sum(!is.na(ux)); n > 1 && n <= 8
+  })]
+  if (length(cand)) return(cand[1])
+  stop("Could not detect a grouping column. Please add a 'condition' column or a factor/character column with 2–8 levels.")
+}
+
+# Parse X_vs_Y from DE file names like DESeq2_Treated_vs_Control.csv
+parse_contrast_from_filename <- function(fp) {
+  base <- basename(fp)
+  m <- regexec("^DESeq2_(.+?)_vs_(.+?)\\.csv$", base, ignore.case = TRUE)
+  pr <- regmatches(base, m)[[1]]
+  if (length(pr) == 3) {
+    list(g1 = pr[2], g2 = pr[3], label = paste0(pr[2], "_vs_", pr[3]))
+  } else {
+    list(g1 = NA_character_, g2 = NA_character_,
+         label = sub("^DESeq2_", "", sub("\\.csv$", "", base)))
+  }
+}
+
+# Robust z-scoring of rows on log2(norm+1)
+prep_z <- function(mat) {
+  orig_ids <- rownames(mat)
+  M <- as.matrix(mat)
+  storage.mode(M) <- "double"
+  M[!is.finite(M)] <- NA_real_
+  M <- log2(M + 1)
+  keep <- apply(M, 1, function(x) {
+    xf <- x[is.finite(x)]
+    if (length(xf) <= 1) return(FALSE)
+    var(xf) > 0
+  })
+  if (!any(keep, na.rm = TRUE))
+    return(list(mat = NULL, kept_ids = character(0), dropped = orig_ids))
+  M <- M[keep, , drop = FALSE]
+  Z <- t(scale(t(M))); Z[!is.finite(Z)] <- 0; Z[Z > 3] <- 3; Z[Z < -3] <- -3
+  rownames(Z) <- rownames(M)
+  list(mat = Z, kept_ids = rownames(Z), dropped = setdiff(orig_ids, rownames(Z)))
+}
+
+# Ensure heatmap matrix by imputing per-row median for NAs
+ensure_heatmap_matrix <- function(mat) {
+  if (is.null(mat) || !nrow(mat) || !ncol(mat)) return(NULL)
+  M <- as.matrix(mat)
+  storage.mode(M) <- "double"
+  M[!is.finite(M)] <- NA_real_
+  keep <- rowSums(is.finite(M)) > 0
+  if (!any(keep)) return(NULL)
+  M <- M[keep, , drop = FALSE]
+  for (i in seq_len(nrow(M))) {
+    ri <- M[i, ]
+    if (anyNA(ri)) {
+      med <- suppressWarnings(median(ri, na.rm = TRUE))
+      if (!is.finite(med)) med <- 0
+      ri[!is.finite(ri)] <- med
+      M[i, ] <- ri
+    }
+  }
+  M
+}
+
+# Save pheatmap to PDF/PNG/SVG
+save_pheatmap_all <- function(mat, stem, width = 8, height = 6, svg = TRUE,
+                              dpi_png = 600, ...) {
+  M <- ensure_heatmap_matrix(mat)
+  if (is.null(M) || !nrow(M) || !ncol(M)) {
+    warning("Heatmap skipped for ", basename(stem), " (empty after cleaning).")
+    return(invisible(NULL))
+  }
+  # PDF
+  pdf_file <- paste0(stem, ".pdf")
+  grDevices::pdf(pdf_file, width = width, height = height)
+  tryCatch({ pheatmap::pheatmap(M, ...) }, error = function(e) {
+    grDevices::dev.off(); stop("Failed PDF for ", basename(stem), ": ", e$message)
+  }); grDevices::dev.off()
+  # PNG
+  png_file <- paste0(stem, ".png")
+  grDevices::png(png_file, width = width * dpi_png, height = height * dpi_png, res = dpi_png)
+  tryCatch({ pheatmap::pheatmap(M, ...) }, error = function(e) {
+    grDevices::dev.off(); stop("Failed PNG for ", basename(stem), ": ", e$message)
+  }); grDevices::dev.off()
+  # SVG
+  if (svg && requireNamespace("svglite", quietly = TRUE)) {
+    svg_file <- paste0(stem, ".svg")
+    svglite::svglite(svg_file, width = width, height = height)
+    tryCatch({ pheatmap::pheatmap(M, ...) }, error = function(e) {
+      grDevices::dev.off(); stop("Failed SVG for ", basename(stem), ": ", e$message)
+    }); grDevices::dev.off()
+  }
+  invisible(NULL)
+}
+
+save_plot_both <- function(plot, file_stem, width = 8, height = 6, dpi = 300) {
+  ggsave(paste0(file_stem, ".pdf"), plot, width = width, height = height)
+  ggsave(paste0(file_stem, ".png"), plot, width = width, height = height, dpi = dpi)
+  if (requireNamespace("svglite", quietly = TRUE)) {
+    ggsave(paste0(file_stem, ".svg"), plot, width = width, height = height, device = svglite::svglite)
+  }
+}
+
+# ------------------------------------------------------------------------------
+# CORE PER-COMPARISON ANALYSIS (FULL PIPELINE)
+# ------------------------------------------------------------------------------
+analyze_hox_gdf11_per_dataset <- function(
+  nc_full, cd_full, ga_full,
+  comp_out_dir,
+  group_col,               # detected grouping column name (e.g., "condition")
+  keep_levels = NULL,      # c("Treated","Control") or NULL for all
+  comp_label = NULL,       # e.g., "Treated_vs_Control"
+  de_file = NULL           # optional DE file matching this comparison
+) {
+  dir.create(comp_out_dir, showWarnings = FALSE, recursive = TRUE)
+
+  # 1) subset samples per comparison
+  cd <- cd_full
+  stopifnot(group_col %in% names(cd))
+  if (!is.null(keep_levels)) {
+    mask <- cd[[group_col]] %in% keep_levels
+    cd <- cd[mask, , drop = FALSE]
+  }
+  common_samples <- intersect(colnames(nc_full), rownames(cd))
+  if (!length(common_samples)) { warning("No overlapping samples for ", comp_label); return(invisible(NULL)) }
+  nc <- nc_full[, common_samples, drop = FALSE]
+  cd <- cd[common_samples, , drop = FALSE]
+
+  # 2) bind grouping into `condition` dynamically
+  cd$condition <- droplevels(factor(cd[[group_col]]))
+  cond_levels_local <- levels(cd$condition)
+
+  # palettes/annotations
+  ann_col_local <- data.frame(condition = cd$condition)
+  rownames(ann_col_local) <- rownames(cd)
+  cond_palette_local <- setNames(hue_pal()(length(cond_levels_local)), cond_levels_local)
+  ann_colors_local <- list(condition = cond_palette_local)
+
+  # 3) HOX/GDF11 detection & mapping
+  ga <- ga_full; rownames(ga) <- ga$Geneid
+  for (cn in c("SYMBOL","Ensembl_GeneID","NCBI_GeneID")) if (!(cn %in% colnames(ga))) ga[[cn]] <- NA_character_
+  anno_df <- data.frame(
+    Geneid   = rownames(ga),
+    SYMBOL   = ga$SYMBOL %||% NA_character_,
+    Ensembl  = ga$Ensembl_GeneID %||% NA_character_,
+    Entrez   = ga$NCBI_GeneID %||% NA_character_,
+    stringsAsFactors = FALSE
+  )
+  det <- do.call(rbind, lapply(anno_df$SYMBOL, detect_cluster))
+  anno_df$HOX_cluster <- det$cluster; anno_df$HOX_num <- det$num; anno_df$is_HOX <- det$is_hox
+  is_gdf    <- !is.na(anno_df$SYMBOL) & toupper(anno_df$SYMBOL) %in% toupper(target_symbols)
+  is_hox_fb <- (!anno_df$is_HOX) & grepl(hox_regex, anno_df$Geneid, ignore.case = TRUE)
+  is_gdf_fb <- (!is_gdf)         & grepl("^GDF11$",  anno_df$Geneid, ignore.case = TRUE)
+  keep_ids  <- anno_df$Geneid[ anno_df$is_HOX | is_gdf | is_hox_fb | is_gdf_fb ]
+
+  nc_sub    <- nc[intersect(keep_ids, rownames(nc)), , drop = FALSE]
+  anno_sub  <- anno_df[match(rownames(nc_sub), anno_df$Geneid), , drop = FALSE]
+  disp_symbol <- anno_sub$SYMBOL; disp_symbol[is.na(disp_symbol) | !nzchar(disp_symbol)] <- rownames(anno_sub)
+  names(disp_symbol) <- rownames(anno_sub)
+
+  # row ordering
+  ord <- order(
+    factor(anno_sub$HOX_cluster, levels = cluster_order),
+    ifelse(is.na(anno_sub$HOX_num), 99L, anno_sub$HOX_num),
+    toupper(disp_symbol)
+  )
+  nc_sub      <- nc_sub[ord, , drop = FALSE]
+  anno_sub    <- anno_sub[ord, , drop = FALSE]
+  disp_symbol <- disp_symbol[ord]
+
+  # Export mapping & long expression
+  map_df <- data.frame(
+    Geneid         = rownames(anno_sub),
+    SYMBOL_display = unname(disp_symbol),
+    SYMBOL_raw     = anno_sub$SYMBOL,
+    HOX_cluster    = anno_sub$HOX_cluster,
+    HOX_num        = anno_sub$HOX_num,
+    Ensembl_GeneID = ga[rownames(anno_sub), "Ensembl_GeneID"],
+    NCBI_GeneID    = ga[rownames(anno_sub), "NCBI_GeneID"],
+    stringsAsFactors = FALSE
+  )
+  fwrite(map_df, file.path(comp_out_dir, "HOX_GDF11_gene_map.csv"))
+
+  expr_long <- as.data.frame(nc_sub, check.names = FALSE)
+  expr_long$SYMBOL_display <- disp_symbol
+  expr_long$HOX_cluster    <- anno_sub$HOX_cluster
+  expr_long$HOX_num        <- anno_sub$HOX_num
+  expr_long$Geneid         <- rownames(expr_long)
+  expr_long <- data.table::melt(
+    data.table::as.data.table(expr_long),
+    id.vars = c("Geneid","SYMBOL_display","HOX_cluster","HOX_num"),
+    variable.name = "sample", value.name = "norm_count"
+  )
+  expr_long$log2_norm <- log2(as.numeric(expr_long$norm_count) + 1)
+  expr_long$condition <- cd[expr_long$sample, "condition"]
+  fwrite(expr_long, file.path(comp_out_dir, "HOX_GDF11_expression_long.csv"))
+
+  # 4) Combined heatmap with cluster gaps
+  if (nrow(nc_sub) > 0) {
+    rows_df <- data.frame(
+      gene_id = rownames(nc_sub), label = unname(disp_symbol),
+      cluster = anno_sub$HOX_cluster, num = anno_sub$HOX_num,
+      stringsAsFactors = FALSE
+    )
+    prep <- prep_z(nc_sub); mat_z <- prep$mat
+    if (!is.null(mat_z)) {
+      kept_ids <- prep$kept_ids
+      lbls <- rows_df$label[match(kept_ids, rows_df$gene_id)]
+      clks <- rows_df$cluster[match(kept_ids, rows_df$gene_id)]
+      rownames(mat_z) <- lbls
+      gap_idx <- which(head(clks, -1) != tail(clks, -1))
+      save_pheatmap_all(
+        mat_z,
+        stem = file.path(comp_out_dir, "HOX_GDF11_heatmap_ALL_clusters"),
+        width = 8.5, height = 7,
+        annotation_col = ann_col_local,
+        annotation_colors = ann_colors_local,
+        cluster_rows   = FALSE,
+        cluster_cols   = TRUE,
+        gaps_row       = gap_idx,
+        show_rownames  = TRUE,
+        fontsize_row   = 7,
+        main = sprintf("HOX (A–D) + GDF11 — %s — log2(norm+1) z-scored", comp_label %||% "")
+      )
+    }
+  }
+
+  # 5) HOX schematic grids (A–D × 1–13) + categories
+  expr_means <- expr_long[, c("SYMBOL_display","HOX_cluster","HOX_num","sample","log2_norm")]
+  expr_means <- expr_means[!is.na(expr_means$HOX_cluster) & !is.na(expr_means$HOX_num), ]
+  gene_means <- aggregate(log2_norm ~ SYMBOL_display + HOX_cluster + HOX_num,
+                          data = expr_means, FUN = mean)
+  grid_df <- do.call(rbind, lapply(c("A","B","C","D"), function(cl) {
+    data.frame(HOX_cluster = cl, HOX_num = groups_1_13)
+  }))
+  grid_df <- merge(grid_df, gene_means,
+                   by = c("HOX_cluster","HOX_num"), all.x = TRUE, sort = TRUE)
+  grid_df$label <- paste0("HOX", grid_df$HOX_cluster, grid_df$HOX_num)
+  y_levels <- c("D","C","B","A"); y_labels <- c("HOXD","HOXC","HOXB","HOXA")
+  vmin <- suppressWarnings(min(grid_df$log2_norm, na.rm = TRUE)); if (!is.finite(vmin)) vmin <- 0
+  vmax <- suppressWarnings(max(grid_df$log2_norm, na.rm = TRUE)); if (!is.finite(vmax)) vmax <- 1
+  vmid <- suppressWarnings(median(grid_df$log2_norm, na.rm = TRUE)); if (!is.finite(vmid)) vmid <- (vmin + vmax)/2
+
+  p_grid <- ggplot(
+    grid_df,
+    aes(x = HOX_num, y = factor(HOX_cluster, levels = y_levels), fill = log2_norm)
+  ) +
+    geom_tile(color = "grey30") +
+    geom_text(aes(label = ifelse(is.na(log2_norm), "", paste0(substr(HOX_cluster,1,1), HOX_num))),
+              size = 3, fontface = "bold") +
+    scale_x_continuous(breaks = groups_1_13) +
+    scale_y_discrete(labels = y_labels) +
+    scale_fill_gradient2(low = "#2166ac", mid = "#f7f7f7", high = "#b2182b",
+                         midpoint = vmid, limits = c(vmin, vmax), oob = squish, na.value = "grey85",
+                         name = "mean log2(norm+1)") +
+    labs(title = sprintf("HOX schematic — %s", comp_label %||% ""),
+         x = "Homology group (1→13; 3'→5')", y = "") +
+    coord_fixed(ratio = 1) + theme_bw(base_size = 12) +
+    theme(panel.grid = element_blank(), plot.title = element_text(face = "bold"))
+  save_plot_both(p_grid, file.path(comp_out_dir, "HOX_schematic_grid"), width = 10, height = 4.5)
+
+  category_bins <- list(anterior = 1:3, thoracic = 4:8, posterior_sacral = 9:13)
+  for (cat_name in names(category_bins)) {
+    rng <- category_bins[[cat_name]]
+    sub_df <- grid_df[grid_df$HOX_num %in% rng, , drop = FALSE]
+    p_sub <- ggplot(
+      sub_df,
+      aes(x = HOX_num, y = factor(HOX_cluster, levels = y_levels), fill = log2_norm)
+    ) +
+      geom_tile(color = "grey30") +
+      geom_text(aes(label = ifelse(is.na(log2_norm), "", paste0(substr(HOX_cluster,1,1), HOX_num))),
+                size = 3, fontface = "bold") +
+      scale_x_continuous(breaks = rng) +
+      scale_y_discrete(labels = y_labels) +
+      scale_fill_gradient2(low = "#2166ac", mid = "#f7f7f7", high = "#b2182b",
+                           midpoint = vmid, limits = c(vmin, vmax), oob = squish, na.value = "grey85",
+                           name = "mean log2(norm+1)") +
+      labs(title = sprintf("HOX schematic — %s — %s (PG%d–%d)", comp_label %||% "",
+                           gsub("_", " ", cat_name), min(rng), max(rng)),
+           x = "Homology group (3'→5')", y = "") +
+      coord_fixed(ratio = 1) + theme_bw(base_size = 12) +
+      theme(panel.grid = element_blank(), plot.title = element_text(face = "bold"))
+    w <- 3 + 0.55 * length(rng)
+    save_plot_both(p_sub, file.path(comp_out_dir, paste0("HOX_schematic_grid_", cat_name)), width = w, height = 4.0)
+  }
+
+  # 6) Per-gene boxplots
+  if (nrow(nc_sub) > 0) {
+    expr_long$SYMBOL_display <- factor(expr_long$SYMBOL_display, levels = disp_symbol)
+    bp <- ggplot(expr_long, aes(x = condition, y = log2_norm, fill = condition)) +
+      geom_boxplot(outlier.shape = NA, width = 0.7, color = "black", linewidth = 0.25) +
+      geom_jitter(aes(color = condition), width = 0.15, alpha = 0.5, size = 1.5) +
+      facet_wrap(~ SYMBOL_display, scales = "free_y", ncol = 6) +
+      labs(title = sprintf("HOX + GDF11 by %s — %s", group_col, comp_label %||% ""),
+           y = "log2(normalized counts + 1)", x = group_col) +
+      theme_bw(base_size = 11) +
+      theme(panel.grid = element_blank(), strip.background = element_rect(fill = "grey90", color = NA),
+            axis.text.x = element_text(angle = 30, hjust = 1)) +
+      scale_fill_manual(values = cond_palette_local) +
+      scale_color_manual(values = cond_palette_local, guide = "none")
+    save_plot_both(bp, file.path(comp_out_dir, "HOX_GDF11_boxplots_log2norm_by_condition"),
+                   width = 20, height = max(4, ceiling(nrow(nc_sub)/4)*2.8))
+  }
+
+  # 7) DE contrast summaries + LFC lollipops (if DE file provided)
+  if (!is.null(de_file) && file.exists(de_file)) {
+    rn_dt <- fread(de_file); rn <- as.data.frame(rn_dt, check.names = FALSE)
+    idcol <- if ("row.names" %in% colnames(rn)) "row.names" else if ("V1" %in% colnames(rn)) "V1" else colnames(rn)[1]
+    rownames(rn) <- rn[[idcol]]; rn[[idcol]] <- NULL
+    rn$Geneid <- rownames(rn)
+    # map to Geneid if file used SYMBOL or Ensembl
+    sym_to_geneid <- setNames(rownames(ga), ga$SYMBOL)
+    ens_to_geneid <- setNames(rownames(ga), ga$Ensembl_GeneID)
+    not_geneid <- !(rn$Geneid %in% rownames(ga))
+    if (any(not_geneid)) {
+      hit_sym <- rn$Geneid[not_geneid] %in% names(sym_to_geneid)
+      rn$Geneid[not_geneid & hit_sym] <- sym_to_geneid[rn$Geneid[not_geneid & hit_sym] ]
+    }
+    not_geneid <- !(rn$Geneid %in% rownames(ga))
+    if (any(not_geneid)) {
+      hit_ens <- rn$Geneid[not_geneid] %in% names(ens_to_geneid)
+      rn$Geneid[not_geneid & hit_ens] <- ens_to_geneid[rn$Geneid[not_geneid & hit_ens] ]
+    }
+    rn$SYMBOL_display <- ga[rn$Geneid, "SYMBOL"]
+    rn$SYMBOL_display[is.na(rn$SYMBOL_display) | !nzchar(rn$SYMBOL_display)] <- rn$Geneid
+    keep_rows <- grepl(hox_regex, rn$SYMBOL_display) |
+                 toupper(rn$SYMBOL_display) %in% toupper(target_symbols) |
+                 grepl(hox_regex, rn$Geneid, ignore.case = TRUE) |
+                 grepl("^GDF11$", rn$Geneid, ignore.case = TRUE)
+    rn_sub <- rn[keep_rows, , drop = FALSE]
+    if (nrow(rn_sub) > 0) {
+      lfc_col <- if ("log2FC_shrunken" %in% colnames(rn_sub)) "log2FC_shrunken" else
+                 if ("log2FC" %in% colnames(rn_sub)) "log2FC" else NA
+      if (!is.na(lfc_col)) {
+        lp <- ggplot(rn_sub, aes(x = .data[[lfc_col]], y = SYMBOL_display)) +
+          geom_segment(aes(x = 0, xend = .data[[lfc_col]], y = SYMBOL_display, yend = SYMBOL_display)) +
+          geom_point(size = 2) +
+          labs(title = sprintf("HOX + GDF11 LFC — %s", comp_label %||% basename(de_file)),
+               x = if (lfc_col == "log2FC_shrunken") "log2FC (shrunken)" else "log2FC (Wald)", y = "") +
+          theme_bw(base_size = 11) + theme(panel.grid.major.y = element_blank(), panel.grid.minor = element_blank())
+        save_plot_both(lp, file.path(comp_out_dir, paste0("HOX_GDF11_LFC_", comp_label %||% "contrast")),
+                       width = 7, height = max(3.5, nrow(rn_sub) * 0.3 + 1.5))
+      }
+      fwrite(rn_sub, file.path(comp_out_dir, paste0("HOX_GDF11_", comp_label %||% "contrast", ".csv")))
+    }
+  }
+
+  # 8) Sample–sample correlation heatmap
+  if (nrow(nc_sub) > 1) {
+    mat_log2 <- log2(nc_sub + 1)
+    keep <- apply(mat_log2, 1, function(x) sd(x, na.rm = TRUE) > 0)
+    mat_log2 <- as.matrix(mat_log2[keep, , drop = FALSE])
+    if (nrow(mat_log2) > 1) {
+      cor_mat <- cor(mat_log2, use = "pairwise.complete.obs", method = "pearson")
+      save_pheatmap_all(
+        cor_mat,
+        stem = file.path(comp_out_dir, "HOX_GDF11_sample_correlation"),
+        width = 7.5, height = 6.5,
+        annotation_col = ann_col_local, annotation_row = ann_col_local,
+        annotation_colors = ann_colors_local,
+        cluster_rows = TRUE, cluster_cols = TRUE,
+        main = sprintf("Sample–sample correlation — %s", comp_label %||% "")
+      )
+    }
+  }
+
+  # 9) PCA on HOX+GDF11 (scores)
+  if (nrow(nc_sub) > 1) {
+    X <- log2(nc_sub + 1)
+    X <- t(scale(t(as.matrix(X)), center = TRUE, scale = TRUE)); X[!is.finite(X)] <- 0
+    pca <- tryCatch(prcomp(t(X), center = FALSE, scale. = FALSE), error = function(e) NULL)
+    if (!is.null(pca) && ncol(pca$x) >= 2) {
+      pca_df <- data.frame(pca$x[, 1:2, drop = FALSE])
+      pca_df$sample    <- rownames(pca_df)
+      pca_df$condition <- cd[rownames(pca_df), "condition"]
+      var_exp <- pca$sdev^2 / sum(pca$sdev^2)
+      pc1lab <- sprintf("PC1 (%.1f%%)", 100 * var_exp[1])
+      pc2lab <- sprintf("PC2 (%.1f%%)", 100 * var_exp[2])
+      pp <- ggplot(pca_df, aes(PC1, PC2, color = condition, label = sample)) +
+        geom_point(size = 2.6) +
+        labs(title = sprintf("PCA on HOX+GDF11 — %s", comp_label %||% ""), x = pc1lab, y = pc2lab, color = group_col) +
+        theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+        scale_color_manual(values = cond_palette_local)
+      if (requireNamespace("ggrepel", quietly = TRUE)) {
+        pp <- pp + ggrepel::geom_text_repel(size = 3, max.overlaps = 50, box.padding = 0.3, segment.size = 0.2)
+      }
+      save_plot_both(pp, file.path(comp_out_dir, "HOX_GDF11_PCA"), width = 7.5, height = 6.2)
+    }
+  }
+
+  # 10) A→P profiles by cluster & by grouping
+  ap_df <- expr_long[!is.na(expr_long$HOX_num) & expr_long$HOX_cluster %in% c("A","B","C","D"), ]
+  if (nrow(ap_df)) {
+    ap_cond <- aggregate(log2_norm ~ condition + HOX_cluster + HOX_num, data = ap_df, FUN = mean)
+    ap_cond$HOX_cluster <- factor(ap_cond$HOX_cluster, levels = c("A","B","C","D"))
+    ap_plot <- ggplot(ap_cond, aes(x = HOX_num, y = log2_norm, color = condition, group = condition)) +
+      geom_line(size = 1) + geom_point(size = 1.7) +
+      facet_wrap(~ HOX_cluster, nrow = 1, scales = "free_y",
+                 labeller = as_labeller(c(A="HOXA",B="HOXB",C="HOXC",D="HOXD"))) +
+      scale_x_continuous(breaks = 1:13) +
+      labs(title = sprintf("A→P HOX profiles by %s — %s", group_col, comp_label %||% ""),
+           x = "Paralog group (PG1→PG13)", y = "mean log2(norm+1)", color = group_col) +
+      theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+      scale_color_manual(values = cond_palette_local)
+    save_plot_both(ap_plot, file.path(comp_out_dir, "HOX_AP_profiles_by_condition"), width = 12, height = 3.8)
+
+    for (cl in c("A","B","C","D")) {
+      sub <- ap_cond[ap_cond$HOX_cluster == cl, , drop = FALSE]
+      if (!nrow(sub)) next
+      pp <- ggplot(sub, aes(HOX_num, log2_norm, color = condition, group = condition)) +
+        geom_line(size = 1) + geom_point(size = 1.7) +
+        scale_x_continuous(breaks = 1:13) +
+        labs(title = sprintf("HOX%s A→P profile by %s — %s", cl, group_col, comp_label %||% ""),
+             x = "Paralog group (PG1→PG13)", y = "mean log2(norm+1)", color = group_col) +
+        theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+        scale_color_manual(values = cond_palette_local)
+      save_plot_both(pp, file.path(comp_out_dir, paste0("HOX", cl, "_AP_profile_by_condition")),
+                     width = 7.5, height = 4.2)
+    }
+  }
+
+  # 11) GDF11 vs posterior HOX (PG9–13)
+  has_gdf11 <- any(toupper(expr_long$SYMBOL_display) == "GDF11")
+  if (has_gdf11) {
+    gdf_df <- expr_long[toupper(expr_long$SYMBOL_display) == "GDF11", c("sample","log2_norm","condition")]
+    names(gdf_df)[2] <- "gdf11"
+    post_df <- expr_long[expr_long$HOX_cluster %in% c("A","B","C","D") & expr_long$HOX_num %in% 9:13, ]
+    if (nrow(post_df)) {
+      post_mean <- aggregate(log2_norm ~ sample, data = post_df, FUN = mean)
+      names(post_mean)[2] <- "posterior_hox"
+      m <- merge(gdf_df, post_mean, by = "sample", all = FALSE)
+      if (nrow(m) >= 3) {
+        r <- suppressWarnings(cor(m$gdf11, m$posterior_hox, use = "complete.obs"))
+        subttl <- if (is.finite(r)) sprintf("Pearson r = %.2f", r) else NULL
+        sp <- ggplot(m, aes(x = gdf11, y = posterior_hox, color = condition, label = sample)) +
+          geom_point(size = 2.4) + geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+          labs(title = sprintf("GDF11 vs posterior HOX (PG9–13) — %s", comp_label %||% ""),
+               subtitle = subttl,
+               x = "GDF11 log2(norm+1)", y = "Posterior HOX (PG9–13) mean log2(norm+1)", color = group_col) +
+          theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+          scale_color_manual(values = cond_palette_local)
+        save_plot_both(sp, file.path(comp_out_dir, "GDF11_vs_posteriorHOX_scatter"), width = 7.2, height = 5.8)
+      }
+    }
+  }
+
+  # 12) Sacral-focused scores & A→P index + sorted heatmap + PG profile
+  PG_ANT  <- 1:3
+  PG_POST <- 10:13
+  score_df <- NULL
+  if (nrow(expr_long)) {
+    el_hox <- expr_long[expr_long$HOX_cluster %in% c("A","B","C","D") & !is.na(expr_long$HOX_num), ]
+    post_df <- el_hox[el_hox$HOX_num %in% PG_POST, ]
+    post_score <- aggregate(log2_norm ~ sample, data = post_df, FUN = mean)
+    names(post_score)[2] <- "posterior_score"
+    ant_df <- el_hox[el_hox$HOX_num %in% PG_ANT, ]
+    if (nrow(ant_df)) {
+      ant_score <- aggregate(log2_norm ~ sample, data = ant_df, FUN = mean)
+      names(ant_score)[2] <- "anterior_score"
+    } else {
+      ant_score <- data.frame(sample = unique(el_hox$sample), anterior_score = NA_real_)
+    }
+    score_df <- merge(post_score, ant_score, by = "sample", all = TRUE)
+    score_df$AP_index <- score_df$posterior_score - score_df$anterior_score
+    score_df$condition <- cd[score_df$sample, "condition"]
+    fwrite(score_df, file.path(comp_out_dir, "HOX_AP_scores_per_sample.csv"))
+  }
+  if (!is.null(score_df)) {
+    p1 <- ggplot(score_df, aes(x = condition, y = posterior_score, fill = condition)) +
+      geom_boxplot(outlier.shape = NA, width = 0.65, color = "black", linewidth = 0.25) +
+      geom_jitter(aes(color = condition), width = 0.15, alpha = 0.7, size = 1.9) +
+      labs(title = sprintf("Posterior HOX score (PG10–13) — %s", comp_label %||% ""),
+           y = "mean log2(norm+1) across PG10–13", x = group_col) +
+      theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+      scale_fill_manual(values = cond_palette_local) +
+      scale_color_manual(values = cond_palette_local, guide = "none")
+    save_plot_both(p1, file.path(comp_out_dir, "posterior_HOX_score_by_condition"), width = 6.8, height = 4.6)
+
+    if (any(!is.na(score_df$AP_index))) {
+      p2 <- ggplot(score_df, aes(x = condition, y = AP_index, fill = condition)) +
+        geom_hline(yintercept = 0, linetype = 2) +
+        geom_boxplot(outlier.shape = NA, width = 0.65, color = "black", linewidth = 0.25) +
+        geom_jitter(aes(color = condition), width = 0.15, alpha = 0.7, size = 1.9) +
+        labs(title = sprintf("A→P index (posterior − anterior) — %s", comp_label %||% ""), y = "AP index", x = group_col) +
+        theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+        scale_fill_manual(values = cond_palette_local) +
+        scale_color_manual(values = cond_palette_local, guide = "none")
+      save_plot_both(p2, file.path(comp_out_dir, "AP_index_by_condition"), width = 6.8, height = 4.6)
+    }
+
+    # Heatmap with samples ordered by posterior score
+    if (nrow(nc_sub) > 0) {
+      ord_samples <- score_df$sample[order(score_df$posterior_score, decreasing = TRUE)]
+      ord_samples <- ord_samples[ord_samples %in% colnames(nc_sub)]
+      if (length(ord_samples) >= 2) {
+        mat <- nc_sub[, ord_samples, drop = FALSE]
+        prep <- prep_z(mat)
+        if (!is.null(prep$mat)) {
+          mat_z <- prep$mat
+          ann_col2 <- data.frame(
+            condition = cd[colnames(mat_z), "condition"],
+            posterior_rank = rank(-score_df$posterior_score[match(colnames(mat_z), score_df$sample)])
+          )
+          rownames(ann_col2) <- colnames(mat_z)
+          save_pheatmap_all(
+            mat_z,
+            stem = file.path(comp_out_dir, "HOX_GDF11_heatmap_samples_sorted_by_posteriorScore"),
+            width = 9, height = 7,
+            annotation_col = ann_col2,
+            annotation_colors = list(condition = cond_palette_local),
+            cluster_rows   = FALSE, cluster_cols = FALSE,
+            show_rownames  = TRUE, fontsize_row = 7,
+            main = sprintf("HOX+GDF11 — samples sorted by posterior score — %s", comp_label %||% "")
+          )
+        }
+      }
+    }
+
+    # Paralog-group mean profile with sacral highlight
+    sacral_rng <- PG_POST
+    pg_means <- aggregate(log2_norm ~ HOX_num, data = grid_df, FUN = function(x) mean(x, na.rm = TRUE))
+    pg_means$is_sacral <- pg_means$HOX_num %in% sacral_rng
+    p_pg <- ggplot(pg_means, aes(HOX_num, log2_norm)) +
+      geom_col(aes(alpha = is_sacral), width = 0.8) +
+      geom_point(size = 2.2) + geom_line(linewidth = 0.8) +
+      scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+      scale_x_continuous(breaks = 1:13) +
+      labs(title = sprintf("Paralog-group mean expression — %s", comp_label %||% ""),
+           subtitle = "Sacral groups (PG10–13) highlighted",
+           x = "Paralog group (PG1→PG13)", y = "mean log2(norm+1) across HOX clusters") +
+      theme_bw(base_size = 12) + theme(panel.grid = element_blank())
+    save_plot_both(p_pg, file.path(comp_out_dir, "HOX_paralog_group_profile_with_sacral_highlight"), width = 8.5, height = 4.2)
+  }
+
+  # 13) Gene–gene correlation (HOX PG9–13 + GDF11)
+  if (nrow(nc_sub) > 0) {
+    want_rows <- (anno_sub$HOX_cluster %in% c("A","B","C","D") & anno_sub$HOX_num %in% 9:13) |
+                 (toupper(disp_symbol) %in% "GDF11")
+    sub_mat <- nc_sub[want_rows, , drop = FALSE]
+    if (nrow(sub_mat) >= 3) {
+      rowlabs <- disp_symbol[rownames(sub_mat)]; rowlabs[is.na(rowlabs) | !nzchar(rowlabs)] <- rownames(sub_mat)
+      X <- log2(sub_mat + 1)
+      keep <- apply(X, 1, function(x) sd(x, na.rm = TRUE) > 0)
+      X <- as.matrix(X[keep, , drop = FALSE])
+      if (nrow(X) >= 3) {
+        C <- stats::cor(t(X), use = "pairwise.complete.obs", method = "pearson")
+        rownames(C) <- colnames(C) <- rowlabs[rownames(C)]
+        save_pheatmap_all(
+          C,
+          stem = file.path(comp_out_dir, "Corr_genes_PG9_13_plus_GDF11"),
+          width = 7.5, height = 6.8,
+          cluster_rows = TRUE, cluster_cols = TRUE,
+          main = sprintf("Gene–gene correlation — PG9–13 + GDF11 — %s", comp_label %||% "")
+        )
+      }
+    }
+  }
+
+  # 14) Optional: stratify by somite region/category if present
+  possible_cols <- c("somite_region", "somite_category", "somite_class", "anatomy", "region")
+  have_col <- possible_cols[possible_cols %in% colnames(cd)]
+  if (!is.null(score_df) && length(have_col) >= 1) {
+    somite_group_col <- have_col[1]
+    meta_cat <- as.character(cd[score_df$sample, somite_group_col])
+    recat <- function(x) {
+      xlow <- tolower(x)
+      if (requireNamespace("dplyr", quietly = TRUE)) {
+        dplyr::case_when(
+          grepl("sacral|sacrum|posterior", xlow) ~ "sacral",
+          grepl("lumbar", xlow) ~ "lumbar",
+          grepl("thoracic|thorax", xlow) ~ "thoracic",
+          grepl("cervical|anterior", xlow) ~ "cervical",
+          TRUE ~ "other"
+        )
+      } else {
+        ifelse(grepl("sacral|sacrum|posterior", xlow), "sacral",
+        ifelse(grepl("lumbar", xlow), "lumbar",
+        ifelse(grepl("thoracic|thorax", xlow), "thoracic",
+        ifelse(grepl("cervical|anterior", xlow), "cervical", "other"))))
+      }
+    }
+    score_df$somite_group <- factor(recat(meta_cat), levels = c("cervical","thoracic","lumbar","sacral","other"))
+
+    p3 <- ggplot(score_df, aes(x = somite_group, y = posterior_score, color = somite_group)) +
+      geom_boxplot(outlier.shape = NA, width = 0.65) + geom_jitter(width = 0.15, alpha = 0.7, size = 1.9) +
+      labs(title = sprintf("Posterior HOX score by %s — %s", somite_group_col, comp_label %||% ""),
+           x = somite_group_col, y = "posterior HOX score (PG10–13)") +
+      theme_bw(base_size = 12) + theme(panel.grid = element_blank())
+    save_plot_both(p3, file.path(comp_out_dir, paste0("posterior_score_by_", somite_group_col)), width = 7.5, height = 4.8)
+
+    if (any(!is.na(score_df$AP_index))) {
+      p4 <- ggplot(score_df, aes(x = somite_group, y = AP_index, color = somite_group)) +
+        geom_hline(yintercept = 0, linetype = 2) +
+        geom_boxplot(outlier.shape = NA, width = 0.65) + geom_jitter(width = 0.15, alpha = 0.7, size = 1.9) +
+        labs(title = sprintf("A→P index by %s — %s", somite_group_col, comp_label %||% ""),
+             x = somite_group_col, y = "AP index (posterior − anterior)") +
+        theme_bw(base_size = 12) + theme(panel.grid = element_blank())
+      save_plot_both(p4, file.path(comp_out_dir, paste0("AP_index_by_", somite_group_col)), width = 7.5, height = 4.8)
+    }
+  } else {
+    message("Somite region/category column not found or score_df NULL; skipping somite-stratified plots.")
+  }
+
+  # 15) GDF11 presence summary
+  gdf_tab <- NULL
+  has_gdf <- any(toupper(expr_long$SYMBOL_display) == "GDF11")
+  if (has_gdf) {
+    gdf_vals <- expr_long[toupper(expr_long$SYMBOL_display) == "GDF11", c("sample","log2_norm","condition")]
+    names(gdf_vals)[2] <- "GDF11_log2norm"
+    thr <- 1
+    prev <- aggregate(GDF11_log2norm ~ condition, data = gdf_vals, FUN = function(x) mean(x > thr))
+    names(prev)[2] <- paste0("fraction_above_", thr)
+    gdf_summary <- data.frame(
+      overall_mean = mean(gdf_vals$GDF11_log2norm, na.rm = TRUE),
+      overall_sd   = sd(gdf_vals$GDF11_log2norm, na.rm = TRUE),
+      n_samples    = length(unique(gdf_vals$sample))
+    )
+    fwrite(gdf_vals,  file.path(comp_out_dir, "GDF11_log2norm_per_sample.csv"))
+    fwrite(prev,      file.path(comp_out_dir, "GDF11_prevalence_by_condition.csv"))
+    fwrite(gdf_summary, file.path(comp_out_dir, "GDF11_summary_overall.csv"))
+
+    p_gdf <- ggplot(gdf_vals, aes(x = condition, y = GDF11_log2norm, fill = condition)) +
+      geom_boxplot(outlier.shape = NA, width = 0.65, color = "black", linewidth = 0.25) +
+      geom_jitter(aes(color = condition), width = 0.15, alpha = 0.7, size = 1.9) +
+      geom_hline(yintercept = thr, linetype = 2) +
+      labs(title = sprintf("GDF11 expression by %s — %s", group_col, comp_label %||% ""),
+           subtitle = paste0("dashed line: log2(norm+1) = ", thr),
+           y = "GDF11 log2(norm+1)", x = group_col) +
+      theme_bw(base_size = 12) + theme(panel.grid = element_blank()) +
+      scale_fill_manual(values = cond_palette_local) +
+      scale_color_manual(values = cond_palette_local, guide = "none")
+    save_plot_both(p_gdf, file.path(comp_out_dir, "GDF11_by_condition"), width = 6.8, height = 4.6)
+  } else {
+    message("GDF11 not found in SYMBOL_display for this subset.")
+  }
+
+  # 16) Presence/Absence diagnostics for HOX grid (A–D × PG1–13)
+  slots <- do.call(rbind, lapply(c("A","B","C","D"), function(cl) {
+    data.frame(HOX_cluster = cl, HOX_num = 1:13, stringsAsFactors = FALSE)
+  }))
+  slots$slot_symbol <- paste0("HOX", slots$HOX_cluster, slots$HOX_num)
+  ga_loc <- ga; nc_loc <- nc
+  find_ann_hits <- function(sym) {
+    if (is.null(ga_loc) || !nrow(ga_loc)) return(character(0))
+    sym_up <- toupper(sym)
+    by_sym <- which(toupper(ga_loc$SYMBOL) == sym_up)
+    by_gid <- grep(paste0("^", sym, "$"), ga_loc$Geneid, ignore.case = TRUE)
+    unique(ga_loc$Geneid[c(by_sym, by_gid)])
+  }
+  nc_ids <- rownames(nc_loc)
+  grid_key <- NULL
+  if (exists("grid_df")) {
+    grid_df_key <- grid_df[, c("HOX_cluster","HOX_num","log2_norm")]
+    grid_key <- within(grid_df_key, { plotted <- !is.na(log2_norm) })
+  }
+  res <- lapply(seq_len(nrow(slots)), function(i) {
+    cl  <- slots$HOX_cluster[i]
+    pg  <- slots$HOX_num[i]
+    sym <- slots$slot_symbol[i]
+    ann_hits <- find_ann_hits(sym)
+    in_ann   <- length(ann_hits) > 0
+    if (!in_ann) {
+      status <- "missing_in_annotation"; mean_norm <- NA_real_
+    } else {
+      hit_in_counts <- intersect(ann_hits, nc_ids)
+      if (!length(hit_in_counts)) { status <- "missing_in_counts"; mean_norm <- NA_real_ }
+      else {
+        vals <- as.matrix(nc_loc[hit_in_counts, , drop = FALSE])
+        vals[!is.finite(vals)] <- NA_real_
+        mean_norm <- suppressWarnings(mean(vals, na.rm = TRUE))
+        if (!is.finite(mean_norm) || is.na(mean_norm) || mean_norm == 0) status <- "in_counts_zero_expr"
+        else status <- "present_expr_not_plotted"
+      }
+    }
+    if (!is.null(grid_key)) {
+      ghit <- grid_key$plotted[grid_key$HOX_cluster == cl & grid_key$HOX_num == pg]
+      if (length(ghit) == 1 && isTRUE(ghit)) status <- "plotted_in_schematic"
+    }
+    data.frame(HOX_cluster = cl, HOX_num = pg, slot_symbol = sym,
+               in_annotation = in_ann, ann_hits = paste(ann_hits, collapse = ";"),
+               status = status, mean_norm = mean_norm, stringsAsFactors = FALSE)
+  })
+  pres_df <- do.call(rbind, res)
+  fwrite(pres_df, file.path(comp_out_dir, "HOX_presence_grid.csv"))
+  summ <- as.data.frame(table(pres_df$status)); colnames(summ) <- c("status","n_slots")
+  fwrite(summ, file.path(comp_out_dir, "HOX_presence_grid_summary.csv"))
+  pres_df$status <- factor(pres_df$status,
+    levels = c("plotted_in_schematic","present_expr_not_plotted","in_counts_zero_expr","missing_in_counts","missing_in_annotation"))
+  pal <- c(plotted_in_schematic = "#1b9e77", present_expr_not_plotted = "#66a61e",
+           in_counts_zero_expr = "#7570b3", missing_in_counts = "#d95f02", missing_in_annotation = "#e7298a")
+  y_levels2 <- c("D","C","B","A"); y_labels2 <- c("HOXD","HOXC","HOXB","HOXA")
+  p_diag <- ggplot(pres_df, aes(x = HOX_num, y = factor(HOX_cluster, levels = y_levels2))) +
+    geom_tile(aes(fill = status), color = "grey30") +
+    geom_text(aes(label = paste0(substr(HOX_cluster,1,1), HOX_num)), size = 3, fontface = "bold") +
+    scale_x_continuous(breaks = 1:13) + scale_y_discrete(labels = y_labels2) +
+    scale_fill_manual(values = pal, drop = FALSE, name = "Slot status",
+                      guide = guide_legend(override.aes = list(color = NA))) +
+    labs(title = sprintf("HOX presence/absence diagnostics — %s", comp_label %||% ""),
+         subtitle = "Reasons for empty tiles in schematic",
+         x = "Paralog group (PG1→PG13, 3′→5′)", y = "") +
+    coord_fixed(ratio = 1) + theme_bw(base_size = 12) + theme(panel.grid = element_blank())
+  save_plot_both(p_diag, file.path(comp_out_dir, "HOX_presence_grid"), width = 10, height = 4.5)
+  status_mat <- reshape(pres_df[, c("HOX_cluster","HOX_num","status")], timevar = "HOX_num", idvar = "HOX_cluster", direction = "wide")
+  row_order <- c("A","B","C","D")
+  status_mat <- status_mat[match(row_order, status_mat$HOX_cluster), ]
+  names(status_mat) <- sub("^status\\.", "PG", names(status_mat))
+  fwrite(status_mat, file.path(comp_out_dir, "HOX_presence_grid_wide.csv"))
+
+  cat("\n✓ Completed per-comparison outputs → ", normalizePath(comp_out_dir), "\n")
+  invisible(NULL)
+}
+
+# ------------------------------------------------------------------------------
+# DRIVER — RUN PER COMPARISON OR ALL
+# ------------------------------------------------------------------------------
+RUN_PER_COMPARISON <- TRUE  # set FALSE to run one combined analysis (ALL samples)
+
+# Ensure we can detect grouping column
+grp_col <- detect_group_col(coldata)
+
+# Gather DE files (optional, for per-comparison labeling & lollipops)
+de_files <- list.files(in_dir, pattern = "^DESeq2_.*\\.csv$", full.names = TRUE)
+
+if (RUN_PER_COMPARISON) {
+  if (!length(de_files)) {
+    warning("No DESeq2_*.csv in ", in_dir, "; running one 'ALL' analysis.")
+    comp_lab <- "ALL"; comp_dir <- file.path(out_dir, "comparison_ALL")
+    analyze_hox_gdf11_per_dataset(norm_counts, coldata, gene_annot,
+      comp_out_dir = comp_dir,
+      group_col = grp_col,
+      keep_levels = NULL,
+      comp_label = comp_lab,
+      de_file = NULL)
+  } else {
+    lv_all <- unique(as.character(coldata[[grp_col]]))
+    for (f in de_files) {
+      pr <- parse_contrast_from_filename(f)
+      if (!is.na(pr$g1) && !is.na(pr$g2) && pr$g1 %in% lv_all && pr$g2 %in% lv_all) {
+        comp_levels <- c(pr$g1, pr$g2)
+        comp_lab    <- paste0(pr$g1, "_vs_", pr$g2)
+      } else {
+        comp_levels <- NULL
+        comp_lab    <- pr$label
+      }
+      comp_dir <- file.path(out_dir, paste0("comparison_", comp_lab))
+      analyze_hox_gdf11_per_dataset(norm_counts, coldata, gene_annot,
+        comp_out_dir = comp_dir,
+        group_col = grp_col,
+        keep_levels = comp_levels,
+        comp_label = comp_lab,
+        de_file = f)
+    }
+  }
+  cat("Per-comparison run complete.\n")
+} else {
+  comp_lab <- "ALL"; comp_dir <- file.path(out_dir, "comparison_ALL")
+  analyze_hox_gdf11_per_dataset(norm_counts, coldata, gene_annot,
+    comp_out_dir = comp_dir,
+    group_col = grp_col,
+    keep_levels = NULL,
+    comp_label = comp_lab,
+    de_file = NULL)
+  cat("Single combined run complete.\n")
+}
+
+cat("\n=== HOX/GDF11 posthoc (per-comparison) ===\n")
+cat("Input dir: ", normalizePath(in_dir), "\n", sep = "")
+cat("Output dir:", normalizePath(out_dir), "\n")
+
+
+```
+
+

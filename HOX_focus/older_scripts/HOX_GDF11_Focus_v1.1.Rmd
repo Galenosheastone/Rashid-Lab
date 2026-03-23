@@ -1,0 +1,336 @@
+---
+title: "R Notebook"
+output: none
+
+Author: Galen O'Shea-Stone
+Date: 9/30/25
+Title: HOX_GDF11_focus
+---
+
+
+```{r}
+# posthoc_HOX_GDF11_analysis.R
+# Standalone post-hoc analysis for HOX clusters (HOXA/B/C/D) and GDF11
+# Run AFTER your DESeq2 script has produced `deseq2_outputs/normalized_counts.csv`,
+# `deseq2_outputs/coldata_used.csv`, and `deseq2_outputs/gene_annotation_used.csv`
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(pheatmap)
+  library(data.table)
+  library(stringr)
+  library(tools)
+})
+
+`%||%` <- function(a, b) if (is.null(a)) b else a  # safe-or helper (defined EARLY)
+
+# ==============================================================================
+# Config
+# ==============================================================================
+in_dir        <- "deseq2_outputs"                # produced by the prior script
+out_dir       <- file.path(in_dir, "HOX_GDF11")  # all outputs here
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Target gene set
+target_symbols <- unique(c("GDF11"))
+hox_regex      <- "^HOX[ABCD][0-9]+"
+
+# ==============================================================================
+# Load core inputs from prior run
+# ==============================================================================
+norm_counts_file <- file.path(in_dir, "normalized_counts.csv")
+coldata_file     <- file.path(in_dir, "coldata_used.csv")
+annot_file       <- file.path(in_dir, "gene_annotation_used.csv")
+
+stopifnot(file.exists(norm_counts_file),
+          file.exists(coldata_file),
+          file.exists(annot_file))
+
+norm_counts <- data.frame(fread(norm_counts_file), check.names = FALSE)
+coldata     <- data.frame(fread(coldata_file), row.names = 1, check.names = FALSE)
+gene_annot  <- data.frame(fread(annot_file),  check.names = FALSE)
+
+# Ensure gene_annot rownames are Geneid
+stopifnot("Geneid" %in% colnames(gene_annot))
+rownames(gene_annot) <- gene_annot$Geneid
+
+# Normalize rownames for normalized_counts (write.csv usually adds first column)
+idcol_nc <- if ("Geneid" %in% colnames(norm_counts)) "Geneid" else
+            if ("V1" %in% colnames(norm_counts)) "V1" else
+            colnames(norm_counts)[1]
+rownames(norm_counts) <- norm_counts[[idcol_nc]]
+norm_counts[[idcol_nc]] <- NULL
+
+# Harmonize samples
+common_samples <- intersect(colnames(norm_counts), rownames(coldata))
+if (length(common_samples) == 0) {
+  stop("No overlapping sample IDs between normalized_counts and coldata_used.")
+}
+norm_counts <- norm_counts[, common_samples, drop = FALSE]
+coldata     <- coldata[common_samples, , drop = FALSE]
+
+# Ensure expected annotation columns exist (create NA columns if missing)
+for (cn in c("SYMBOL","Ensembl_GeneID","NCBI_GeneID")) {
+  if (!(cn %in% colnames(gene_annot))) {
+    gene_annot[[cn]] <- NA_character_
+  }
+}
+
+# ==============================================================================
+# Identify HOX + GDF11 rows robustly
+# ==============================================================================
+SYMBOL_vec <- gene_annot$SYMBOL
+names(SYMBOL_vec) <- rownames(gene_annot)
+
+is_hox <- !is.na(SYMBOL_vec) & grepl(hox_regex, SYMBOL_vec)
+is_gdf <- !is.na(SYMBOL_vec) & toupper(SYMBOL_vec) %in% toupper(target_symbols)
+
+# Also catch cases where SYMBOL is missing but Geneid looks like HOX... or GDF11
+fallback_ids <- rownames(gene_annot)
+is_hox_fb    <- !is_hox & grepl(hox_regex, fallback_ids, ignore.case = TRUE)
+is_gdf_fb    <- !is_gdf & grepl("^GDF11$", fallback_ids, ignore.case = TRUE)
+
+keep_ids <- unique(c(
+  rownames(gene_annot)[is_hox | is_gdf | is_hox_fb | is_gdf_fb]
+))
+
+if (length(keep_ids) == 0) {
+  warning("No HOX/GDF11 features found in your annotation. Check species/annotation.")
+}
+
+# Subset matrices to available genes
+nc_sub <- norm_counts[intersect(keep_ids, rownames(norm_counts)), , drop = FALSE]
+ga_sub <- gene_annot[intersect(keep_ids, rownames(gene_annot)), , drop = FALSE]
+
+# Build display symbol (fallback to Geneid)
+disp_symbol <- ga_sub$SYMBOL
+disp_symbol[is.na(disp_symbol) | !nzchar(disp_symbol)] <- rownames(ga_sub)
+names(disp_symbol) <- rownames(ga_sub)
+
+# Order genes nicely: HOX cluster & numeric index; then put GDF11 after HOX
+order_key <- function(sym) {
+  m <- regexec("^(HOX[ABCD])([0-9]+)(.*)$", sym)
+  pr <- regmatches(sym, m)
+  sapply(seq_along(sym), function(i) {
+    p <- pr[[i]]
+    if (length(p) >= 3) {
+      cluster <- p[2]
+      num     <- sprintf("%02d", as.integer(p[3]))
+      paste(cluster, num, sep = "_")
+    } else if (toupper(sym[i]) == "GDF11") {
+      "Z_GDF11"
+    } else {
+      paste0("ZZZ_", sym[i])
+    }
+  })
+}
+
+gene_order <- if (nrow(nc_sub)) {
+  order(order_key(disp_symbol[rownames(nc_sub)]))
+} else integer(0)
+
+if (length(gene_order)) {
+  nc_sub      <- nc_sub[gene_order, , drop = FALSE]
+  ga_sub      <- ga_sub[rownames(nc_sub), , drop = FALSE]
+  disp_symbol <- disp_symbol[rownames(nc_sub)]
+}
+
+# ==============================================================================
+# Save a tidy mapping & expression table
+# ==============================================================================
+# Ensure mapping columns exist
+ens_col <- if ("Ensembl_GeneID" %in% colnames(ga_sub)) ga_sub$Ensembl_GeneID else NA_character_
+ent_col <- if ("NCBI_GeneID"    %in% colnames(ga_sub)) ga_sub$NCBI_GeneID    else NA_character_
+
+map_df <- data.frame(
+  Geneid         = rownames(ga_sub),
+  SYMBOL_display = unname(disp_symbol),
+  SYMBOL_raw     = ga_sub$SYMBOL,
+  Ensembl_GeneID = ens_col,
+  NCBI_GeneID    = ent_col,
+  stringsAsFactors = FALSE
+)
+fwrite(map_df, file.path(out_dir, "HOX_GDF11_gene_map.csv"))
+
+expr_long <- as.data.frame(nc_sub, check.names = FALSE)
+expr_long$SYMBOL_display <- disp_symbol
+expr_long$Geneid <- rownames(expr_long)
+expr_long <- data.table::melt(
+  data.table::as.data.table(expr_long),
+  id.vars = c("Geneid","SYMBOL_display"),
+  variable.name = "sample", value.name = "norm_count"
+)
+expr_long$log2_norm <- log2(as.numeric(expr_long$norm_count) + 1)
+expr_long$condition <- coldata[expr_long$sample, "condition"]
+fwrite(expr_long, file.path(out_dir, "HOX_GDF11_expression_long.csv"))
+
+# ==============================================================================
+# Heatmap (z-scored by gene on log2 normalized counts) — FIXED title
+# ==============================================================================
+if (nrow(nc_sub) == 0) {
+  warning("No HOX/GDF11 rows available for heatmap; skipping.")
+} else {
+  mat_log2 <- log2(nc_sub + 1)
+  mat_z    <- t(scale(t(as.matrix(mat_log2))))
+  ann_col  <- data.frame(condition = coldata$condition)
+  rownames(ann_col) <- rownames(coldata)
+  rownames(mat_z) <- disp_symbol[rownames(nc_sub)]
+
+  pdf(file.path(out_dir, "HOX_GDF11_heatmap_log2_norm_z_by_gene.pdf"), width = 7.5, height = 6.5)
+  pheatmap(
+    mat_z,
+    annotation_col = ann_col,
+    cluster_rows   = FALSE,
+    cluster_cols   = TRUE,
+    main           = "HOX + GDF11 — log2(normalized+1), z-scored by gene"
+  )
+  dev.off()
+}
+
+# ==============================================================================
+# Per-gene boxplots across conditions (log2 normalized counts)
+# ==============================================================================
+if (nrow(nc_sub) > 0) {
+  expr_long$SYMBOL_display <- factor(
+    expr_long$SYMBOL_display,
+    levels = disp_symbol[rownames(nc_sub)]
+  )
+
+  bp <- ggplot(expr_long, aes(x = condition, y = log2_norm)) +
+    geom_boxplot(outlier.shape = NA, width = 0.7) +
+    geom_jitter(aes(group = condition), width = 0.15, height = 0, alpha = 0.5, size = 1.5) +
+    facet_wrap(~ SYMBOL_display, scales = "free_y", ncol = 4) +
+    labs(title = "HOX + GDF11 expression by condition",
+         y = "log2(normalized counts + 1)", x = "") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid = element_blank(),
+          strip.background = element_rect(fill = "grey90", color = NA),
+          axis.text.x = element_text(angle = 30, hjust = 1))
+
+  ggsave(file.path(out_dir, "HOX_GDF11_boxplots_log2norm_by_condition.pdf"),
+         bp, width = 10, height = max(4, ceiling(nrow(nc_sub)/4)*2.8))
+}
+
+# ==============================================================================
+# Collect DESeq2 contrast files and filter to HOX/GDF11
+# ==============================================================================
+all_de <- list.files(in_dir, pattern = "^DESeq2_.*\\.csv$", full.names = TRUE)
+
+# Build quick lookup maps for SYMBOL and ENSEMBL -> Geneid
+sym_to_geneid <- setNames(rownames(gene_annot), gene_annot$SYMBOL)
+ens_to_geneid <- setNames(rownames(gene_annot), gene_annot$Ensembl_GeneID)
+
+summary_list <- list()
+
+if (length(all_de) == 0) {
+  warning("No DESeq2_* CSV files found. Skipping contrast-specific outputs.")
+} else {
+  for (f in all_de) {
+    rn_dt <- fread(f)
+    rn    <- as.data.frame(rn_dt, check.names = FALSE)
+
+    # Detect id column (write.csv often adds row.names or V1)
+    idcol <- if ("row.names" %in% colnames(rn)) "row.names" else
+             if ("V1" %in% colnames(rn)) "V1" else
+             colnames(rn)[1]
+
+    rownames(rn) <- rn[[idcol]]
+    rn[[idcol]]  <- NULL
+
+    # Start with assumption that rownames are Geneid; if not, map via SYMBOL/ENSEMBL
+    rn$Geneid <- rownames(rn)
+
+    not_geneid <- !(rn$Geneid %in% rownames(gene_annot))
+    if (any(not_geneid)) {
+      # Map SYMBOL -> Geneid if possible
+      hit_sym <- rn$Geneid[not_geneid] %in% names(sym_to_geneid)
+      if (any(hit_sym)) {
+        idx <- which(not_geneid)[hit_sym]
+        rn$Geneid[idx] <- sym_to_geneid[rn$Geneid[idx]]
+      }
+    }
+    not_geneid <- !(rn$Geneid %in% rownames(gene_annot))
+    if (any(not_geneid)) {
+      # Map ENSEMBL -> Geneid if possible
+      hit_ens <- rn$Geneid[not_geneid] %in% names(ens_to_geneid)
+      if (any(hit_ens)) {
+        idx <- which(not_geneid)[hit_ens]
+        rn$Geneid[idx] <- ens_to_geneid[rn$Geneid[idx]]
+      }
+    }
+
+    # Build display symbol
+    rn$SYMBOL_display <- gene_annot[rn$Geneid, "SYMBOL"]
+    missing_disp <- is.na(rn$SYMBOL_display) | !nzchar(rn$SYMBOL_display)
+    rn$SYMBOL_display[missing_disp] <- rn$Geneid[missing_disp]
+
+    # Keep just HOX/GDF11 by SYMBOL or Geneid patterns
+    keep_rows <- grepl(hox_regex, rn$SYMBOL_display) |
+                 toupper(rn$SYMBOL_display) %in% toupper(target_symbols) |
+                 grepl(hox_regex, rn$Geneid, ignore.case = TRUE) |
+                 grepl("^GDF11$", rn$Geneid, ignore.case = TRUE)
+
+    rn_sub <- rn[keep_rows, , drop = FALSE]
+    if (nrow(rn_sub) > 0) {
+      base <- basename(f)
+      contrast_label <- sub("^DESeq2_", "", sub("\\.csv$", "", base))
+      rn_sub$contrast <- contrast_label
+
+      # Save per-contrast filtered table
+      fwrite(rn_sub, file.path(out_dir, paste0("HOX_GDF11_", contrast_label, ".csv")))
+
+      # Lollipop plot if we have a fold-change column
+      lfc_col <- if ("log2FC_shrunken" %in% colnames(rn_sub)) "log2FC_shrunken" else
+                 if ("log2FC" %in% colnames(rn_sub)) "log2FC" else NA
+      if (!is.na(lfc_col)) {
+        plot_df <- rn_sub
+        # Order by cluster/number for readability if possible
+        plot_df$SYMBOL_display <- factor(
+          plot_df$SYMBOL_display,
+          levels = unique(c(disp_symbol, setdiff(plot_df$SYMBOL_display, disp_symbol)))
+        )
+
+        lp <- ggplot(plot_df, aes(x = .data[[lfc_col]], y = SYMBOL_display)) +
+          geom_segment(aes(x = 0, xend = .data[[lfc_col]],
+                           y = SYMBOL_display, yend = SYMBOL_display)) +
+          geom_point(size = 2) +
+          labs(title = paste0("HOX + GDF11 LFC — ", contrast_label),
+               x = if (lfc_col == "log2FC_shrunken") "log2FC (shrunken)" else "log2FC (Wald)",
+               y = "") +
+          theme_bw(base_size = 11) +
+          theme(panel.grid.major.y = element_blank(),
+                panel.grid.minor = element_blank())
+
+        ggsave(file.path(out_dir, paste0("HOX_GDF11_LFC_", contrast_label, ".pdf")),
+               lp, width = 7, height = max(3.5, nrow(plot_df) * 0.3 + 1.5))
+      }
+
+      summary_list[[length(summary_list) + 1]] <- rn_sub
+    }
+  }
+}
+
+# Combined tidy summary across all contrasts
+if (length(summary_list)) {
+  all_summary <- data.table::rbindlist(summary_list, fill = TRUE)
+  fwrite(all_summary, file.path(out_dir, "HOX_GDF11_all_contrasts_tidy.csv"))
+} else {
+  warning("No HOX/GDF11 rows found in any DESeq2_* CSV files.")
+}
+
+# ==============================================================================
+# Done
+# ==============================================================================
+cat("\n=== HOX/GDF11 posthoc outputs ===\n")
+cat("Input dir: ", normalizePath(in_dir), "\n", sep = "")
+cat("Output dir:", normalizePath(out_dir), "\n")
+if (length(disp_symbol)) {
+  cat("Genes included:", paste(unique(disp_symbol), collapse = ", "), "\n")
+} else {
+  cat("Genes included: (none found)\n")
+}
+
+
+```
+
+

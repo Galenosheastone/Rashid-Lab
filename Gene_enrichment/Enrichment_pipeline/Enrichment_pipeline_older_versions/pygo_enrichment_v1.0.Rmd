@@ -1,0 +1,232 @@
+---
+title: "Pygo_gene_enrichment"
+author: "Galen O'Shea-Stone"
+date: "2025-06-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+##############################################################################
+## Transcriptomics → GO / KEGG → Reactome enrichment (Gallus gallus)        ##
+## ----------------------------------------------------------------------- ##
+##  • Input : CSV with columns  gene_id , log2FC , padj                    ##
+##  • Output: Excel with ORA & GSEA tables, PDF dot-plots, optional KEGG   ##
+##            pathway diagrams coloured by log2FC                          ##
+##############################################################################
+
+## 0.  CONFIGURATION  =========================================================
+# Change `input_file` to the path of your CSV file
+input_file   <- "pygo_MAIN.csv"      # ← change to your file name
+# (Ensure the CSV columns are in order: gene symbol, log2 fold change, adjusted p-value)
+species_name <- "chicken"            # ReactomePA expects "chicken" for Gallus gallus
+kegg_code    <- "gga"                # 3-letter KEGG code for Gallus gallus
+padj_cutoff  <- 0.05                 # threshold for defining significant genes
+
+## 1.  SETUP  -----------------------------------------------------------------
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+## ── CRAN extras required by clusterProfiler (network plots, tree plots, pie charts)
+cran_extras <- c(
+  "ggraph",      # for network/emap plotting
+  "igraph",      # underlying graph engine
+  "graphlayouts",# layout algorithms for ggraph
+  "ggforce",     # specialized geoms used by clusterProfiler
+  "ape",         # phylogenetic tree utilities used by clusterProfiler
+  "scatterpie"   # pie charts on enrichment trees
+)
+need_cran <- cran_extras[!sapply(cran_extras, requireNamespace, quietly = TRUE)]
+if (length(need_cran)) {
+  install.packages(need_cran, dependencies = TRUE)
+}
+
+## ── Bioconductor core packages  --------------------------------------------
+bio_pkgs <- c(
+  "clusterProfiler",
+  "ReactomePA",
+  "pathview",
+  "biomaRt",
+  "AnnotationDbi",
+  "dplyr",
+  "ggplot2",
+  "openxlsx"
+)
+need_bio <- bio_pkgs[!sapply(bio_pkgs, requireNamespace, quietly = TRUE)]
+if (length(need_bio)) {
+  BiocManager::install(need_bio, update = FALSE, ask = FALSE)
+}
+
+## ── OrgDb for Gallus gallus  ------------------------------------------------
+# This installs the OrgDb package if it’s not already present
+if (!requireNamespace("org.Gg.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Gg.eg.db", update = FALSE, ask = FALSE)
+}
+
+## ── Load all libraries  ----------------------------------------------------
+library(clusterProfiler)
+library(ReactomePA)
+library(pathview)
+library(biomaRt)
+library(AnnotationDbi)
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(org.Gg.eg.db)
+
+# Assign the OrgDb object for later calls
+orgDb <- org.Gg.eg.db
+
+# Create output directory if it doesn’t already exist
+dir.create("output", showWarnings = FALSE)
+
+## 2.  READ DIFFERENTIAL EXPRESSION TABLE  ------------------------------------
+tbl <- read.csv(input_file, check.names = FALSE) %>%
+       dplyr::rename(gene = 1, logFC = 2, padj = 3)
+
+## 3.  ID-MAPPING  (Gene Symbol → Entrez)  ------------------------------------
+# Map from SYMBOL to ENTREZID using the OrgDb
+gene2entrez <- AnnotationDbi::select(
+  orgDb,
+  keys    = tbl$gene,
+  columns = "ENTREZID",
+  keytype = "SYMBOL"
+)
+
+# Join back to the main table and drop any rows without an Entrez ID
+tbl <- dplyr::left_join(tbl, gene2entrez, by = c("gene" = "SYMBOL")) %>%
+       dplyr::filter(!is.na(ENTREZID))
+
+# Define the universe and significant gene vectors (as character)
+gene_universe <- tbl$ENTREZID %>% as.character()
+sig_genes     <- tbl %>% 
+                 dplyr::filter(padj < padj_cutoff) %>% 
+                 dplyr::pull(ENTREZID) %>% 
+                 as.character()
+
+## 4.  OVER-REPRESENTATION ANALYSIS (ORA)  -------------------------------------
+## 4a.  GO Biological Process (BP)
+ego <- enrichGO(
+  gene          = sig_genes,
+  universe      = gene_universe,
+  OrgDb         = orgDb,
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  readable      = TRUE
+)
+
+## 4b.  KEGG ORA (Gallus gallus = "gga")
+ekegg <- enrichKEGG(
+  gene          = sig_genes,
+  universe      = gene_universe,
+  organism      = kegg_code,
+  keyType       = "ncbi-geneid",   # default, but explicit here
+  pAdjustMethod = "BH"
+)
+# Check if KEGG returned any results
+if (is.null(ekegg) || nrow(as.data.frame(ekegg)) == 0) {
+  warning("enrichKEGG returned no pathways. 
+          Verify that your Entrez IDs exist in KEGG for '", kegg_code, "'.")
+} else {
+  message("✅ enrichKEGG succeeded with ", nrow(as.data.frame(ekegg)), " pathways.")
+}
+
+## 4c.  Reactome ORA (Gallus gallus → "chicken")
+ereact <- enrichPathway(
+  gene          = sig_genes,
+  universe      = gene_universe,
+  organism      = species_name,      # must be "chicken" for Gallus gallus
+  pAdjustMethod = "BH",
+  readable      = TRUE
+)
+# Check if ReactomePA returned any results
+if (is.null(ereact) || nrow(as.data.frame(ereact)) == 0) {
+  warning("enrichPathway returned no pathways. 
+          Ensure that '", species_name, "' is a supported organism in ReactomePA.")
+} else {
+  message("✅ enrichPathway succeeded with ", nrow(as.data.frame(ereact)), " pathways.")
+}
+
+## 5.  GSEA (preranked on log2FC)  --------------------------------------------
+ranks <- tbl %>%
+         dplyr::arrange(dplyr::desc(logFC)) %>%
+         dplyr::mutate(rnk = logFC) %>%
+         dplyr::select(ENTREZID, rnk) %>%
+         tibble::deframe()
+
+gsea_go <- gseGO(
+  geneList      = ranks,
+  OrgDb         = orgDb,
+  ont           = "BP",
+  pAdjustMethod = "BH"
+)
+# Check if GSEA returned any results
+if (is.null(gsea_go) || nrow(as.data.frame(gsea_go)) == 0) {
+  warning("gseGO returned no significant pathways. 
+          Try relaxing thresholds or verify your ranked gene list.")
+} else {
+  message("✅ gseGO succeeded with ", nrow(as.data.frame(gsea_go)), " pathways.")
+}
+
+## 6.  SAVE TABLES TO EXCEL  --------------------------------------------------
+openxlsx::write.xlsx(
+  list(
+    GO_ORA   = if (!is.null(ego)     && nrow(as.data.frame(ego)) > 0)   as.data.frame(ego)   else data.frame(),
+    KEGG_ORA = if (!is.null(ekegg)   && nrow(as.data.frame(ekegg)) > 0) as.data.frame(ekegg) else data.frame(),
+    Reactome = if (!is.null(ereact)  && nrow(as.data.frame(ereact)) > 0)as.data.frame(ereact)else data.frame(),
+    GO_GSEA  = if (!is.null(gsea_go) && nrow(as.data.frame(gsea_go)) > 0)as.data.frame(gsea_go)else data.frame()
+  ),
+  file      = "output/enrichment_results.xlsx",
+  overwrite = TRUE
+)
+
+## 7.  QUICK DOT-PLOTS  -------------------------------------------------------
+pdf("output/dotplots.pdf", width = 9, height = 6)
+
+if (!is.null(ego) && nrow(as.data.frame(ego)) > 0) {
+  dotplot(ego, showCategory = 15, title = "GO BP ORA")
+} else {
+  message("⚠️ Skipping GO dotplot: no enriched terms.")
+}
+
+if (!is.null(ekegg) && nrow(as.data.frame(ekegg)) > 0) {
+  dotplot(ekegg, showCategory = 15, title = "KEGG ORA")
+} else {
+  message("⚠️ Skipping KEGG dotplot: no enriched pathways.")
+}
+
+if (!is.null(ereact) && nrow(as.data.frame(ereact)) > 0) {
+  dotplot(ereact, showCategory = 15, title = "Reactome ORA")
+} else {
+  message("⚠️ Skipping Reactome dotplot: no enriched pathways.")
+}
+
+if (!is.null(gsea_go) && nrow(as.data.frame(gsea_go)) > 0) {
+  dotplot(gsea_go, showCategory = 15, title = "GO GSEA (preranked)")
+} else {
+  message("⚠️ Skipping GSEA dotplot: no significant pathways.")
+}
+
+dev.off()
+
+## 8.  OPTIONAL: COLOUR THE TOP KEGG PATHWAY  ---------------------------------
+if (!is.null(ekegg) && nrow(as.data.frame(ekegg)) > 0) {
+  top_pathway <- ekegg$ID[1]
+  pathview(
+    gene.data   = tbl$logFC %>% setNames(tbl$ENTREZID),
+    pathway.id  = top_pathway,
+    species     = kegg_code,
+    out.suffix  = "logFC",
+    kegg.native = TRUE
+  )
+  message("✅ KEGG diagram for pathway ", top_pathway, " saved.")
+}
+
+cat("\n✓ All done!  Check the 'output/' folder for Excel & PDF results.\n")
+
+```

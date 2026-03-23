@@ -1,0 +1,91 @@
+input_file: DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS.csv
+species_name: chicken
+kegg_code: gga
+padj_cutoff: 0.05
+logFC_cutoff: 2.0
+pathview_use_sig_only: yes
+pathview_padj_cutoff: 0.05
+pathview_logFC_cutoff: 2.0
+pathview_non_sig_mode: zero
+topN_per_direction: 2000.0
+use_table_universe: yes
+minGSSize: 10.0
+maxGSSize: 500.0
+install_missing: no
+run_directional_enrichment: yes
+run_damp_fa_dashboard: yes
+run_hallmark_gsea: yes
+run_activity_inference: yes
+activity_use_human_orthologs: yes
+hallmark_species: Gallus gallus
+hallmark_selected:
+- HALLMARK_INFLAMMATORY_RESPONSE
+- HALLMARK_TNFA_SIGNALING_VIA_NFKB
+- HALLMARK_IL6_JAK_STAT3_SIGNALING
+- HALLMARK_INTERFERON_ALPHA_RESPONSE
+- HALLMARK_INTERFERON_GAMMA_RESPONSE
+- HALLMARK_COMPLEMENT
+- HALLMARK_FATTY_ACID_METABOLISM
+- HALLMARK_OXIDATIVE_PHOSPHORYLATION
+- HALLMARK_GLYCOLYSIS
+- HALLMARK_HYPOXIA
+damp_kw:
+- damp
+- alarmin
+- hmgb
+- hsp
+- s100
+- tlr
+- nod
+- nlr
+- inflammasome
+- pyropt
+- necropt
+- sting
+- cgas
+- aim2
+- il1
+- il-1
+- tnf
+- nfkb
+- interferon
+- complement
+- chemokin
+- cxcl
+- ccl
+lipid_kw:
+- fatty acid
+- lipid
+- ppar
+- acyl
+- acsl
+- cpt
+- acox
+- fasn
+- scd
+- elovl
+- beta-oxid
+- eicosanoid
+- arachidon
+- ptgs
+- cox
+- alox
+- pla2
+- leukotr
+- prostano
+sterile_kw:
+- sterile
+- pattern recognition
+- prr
+- damage
+- necrosis
+- damps
+- innate immune
+- tlr signaling
+- nod-like
+- cytosolic dna
+damp_pattern: damp|alarmin|hmgb|hsp|s100|tlr|nod|nlr|inflammasome|pyropt|necropt|sting|cgas|aim2|il1|il-1|tnf|nfkb|interferon|complement|chemokin|cxcl|ccl
+lipid_pattern: fatty acid|lipid|ppar|acyl|acsl|cpt|acox|fasn|scd|elovl|beta-oxid|eicosanoid|arachidon|ptgs|cox|alox|pla2|leukotr|prostano
+sterile_pattern: sterile|pattern recognition|prr|damage|necrosis|damps|innate immune|tlr
+  signaling|nod-like|cytosolic dna
+run_id: 20260223_115157

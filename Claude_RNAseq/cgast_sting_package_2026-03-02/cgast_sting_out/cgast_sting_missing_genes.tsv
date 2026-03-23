@@ -1,0 +1,12 @@
+symbol	module
+MB21D1	Sensors
+IFI16	Sensors
+ZBP1	Sensors
+IKBKG	Kinases
+IRF3	TFs
+RELA	TFs
+IFNB1	IFN
+IRF9	IFNAR/JAK-STAT
+ISG15	ISGs/Outputs
+CXCL10	ISGs/Outputs
+TNF	ISGs/Outputs

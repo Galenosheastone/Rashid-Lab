@@ -1,0 +1,205 @@
+script_full = textwrap.dedent(r"""
+---
+title: "Pygo_gene_enrichment (FINAL)"
+author: "Galen O'Shea-Stone"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+##############################################################################
+## Transcriptomics → GO / KEGG → Reactome enrichment (Gallus gallus)        ##
+## + diagnostics, Excel export, and polished visualisations                 ##
+##############################################################################
+
+## 0.  CONFIGURATION  =========================================================
+input_file   <- "pygo_MAIN.csv"   # ← your differential‐expression table
+species_name <- "chicken"         # ReactomePA shorthand for Gallus gallus
+kegg_code    <- "gga"             # KEGG organism code
+padj_cutoff  <- 0.05              # significance threshold
+logFC_cutoff <- 1                 # minimum |log2FC| to retain
+topN         <- 300               # keep top N up + N down genes (optional)
+
+## 1.  INSTALL & LOAD PACKAGES  ----------------------------------------------
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+cran_extras <- c("UpSetR", "EnhancedVolcano")
+need_cran   <- cran_extras[!sapply(cran_extras, requireNamespace, quietly = TRUE)]
+if (length(need_cran)) install.packages(need_cran, dependencies = TRUE)
+
+bio_pkgs <- c("clusterProfiler","ReactomePA","pathview","biomaRt",
+              "AnnotationDbi","dplyr","ggplot2","openxlsx",
+              "ComplexHeatmap","circlize","enrichplot")
+need_bio <- bio_pkgs[!sapply(bio_pkgs, requireNamespace, quietly = TRUE)]
+if (length(need_bio)) BiocManager::install(need_bio, update = FALSE, ask = FALSE)
+
+if (!requireNamespace("org.Gg.eg.db", quietly = TRUE))
+  BiocManager::install("org.Gg.eg.db", update = FALSE, ask = FALSE)
+
+# load libraries -------------------------------------------------------------
+library(clusterProfiler)
+library(ReactomePA)
+library(pathview)
+library(biomaRt)
+library(AnnotationDbi)
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(ComplexHeatmap)
+library(circlize)
+library(UpSetR)
+library(EnhancedVolcano)
+library(enrichplot)
+library(org.Gg.eg.db)
+orgDb <- org.Gg.eg.db
+
+dir.create("output", showWarnings = FALSE)
+
+## 2.  READ & PREP DATA  ------------------------------------------------------
+tbl <- read.csv(input_file, check.names = FALSE) |>
+        rename(gene = 1, logFC = 2, padj = 3)
+
+# map symbols → Entrez
+gene2entrez <- AnnotationDbi::select(
+  orgDb, keys = tbl$gene, columns = "ENTREZID", keytype = "SYMBOL"
+)
+
+tbl <- left_join(tbl, gene2entrez, by = c("gene" = "SYMBOL")) |>
+       filter(!is.na(ENTREZID))
+
+gene_universe <- tbl$ENTREZID |> as.character()
+
+tbl_sig <- tbl |>
+           filter(padj < padj_cutoff, abs(logFC) >= logFC_cutoff) |>
+           arrange(desc(logFC))
+
+if (!is.null(topN) && nrow(tbl_sig) > 2*topN) {
+  tbl_sig <- bind_rows(
+    head(tbl_sig,  topN),          # top up-regulated
+    tail(tbl_sig,  topN)           # top down-regulated
+  )
+}
+
+sig_genes <- unique(tbl_sig$ENTREZID) |> as.character()
+
+cat(sprintf(
+  "\nUniverse: %d genes | Test set: %d genes (%.1f%% of universe)\n",
+  length(unique(gene_universe)),
+  length(sig_genes),
+  100*length(sig_genes)/length(unique(gene_universe))
+))
+
+## 3.  ENRICHMENT ANALYSES  ---------------------------------------------------
+ego <- enrichGO(gene = sig_genes, universe = gene_universe,
+                OrgDb = orgDb, ont = "BP", pAdjustMethod = "BH",
+                readable = TRUE)
+
+ekegg <- enrichKEGG(gene = sig_genes, universe = gene_universe,
+                    organism = kegg_code, keyType = "ncbi-geneid",
+                    pAdjustMethod = "BH")
+if (!is.null(ekegg) && nrow(as.data.frame(ekegg)) > 0)
+  ekegg <- setReadable(ekegg, orgDb, keyType = "ENTREZID")
+
+ereact <- enrichPathway(gene = sig_genes, universe = gene_universe,
+                        organism = species_name, pAdjustMethod = "BH",
+                        readable = TRUE)
+
+# preranked GSEA -------------------------------------------------------------
+ranks <- tbl |> arrange(desc(logFC)) |>
+         transmute(ENTREZID, rnk = logFC) |> tibble::deframe()
+
+gsea_go <- gseGO(geneList = ranks, OrgDb = orgDb, ont = "BP",
+                 pAdjustMethod = "BH")
+if (!is.null(gsea_go) && nrow(as.data.frame(gsea_go)) > 0)
+  gsea_go <- setReadable(gsea_go, orgDb, keyType = "ENTREZID")
+
+## 4.  EXPORT TABLES  ---------------------------------------------------------
+as_df <- function(res, id_col = "geneID") {
+  if (is.null(res) || nrow(as.data.frame(res)) == 0) return(data.frame())
+  as.data.frame(res) |> rename(Genes = !!id_col)
+}
+
+write.xlsx(
+  list(GO_ORA   = as_df(ego, "geneID"),
+       KEGG_ORA = as_df(ekegg, "geneID"),
+       Reactome = as_df(ereact, "geneID"),
+       GO_GSEA  = as_df(gsea_go, "core_enrichment")),
+  file      = "output/enrichment_results_with_genes.xlsx",
+  overwrite = TRUE
+)
+
+## 5.  PLOTTING HELPERS  ------------------------------------------------------
+save_plot <- function(plot, filename, w = 7, h = 5) {
+  ggsave(file.path("output", filename), plot = plot,
+         width = w, height = h, units = "in")
+}
+
+make_dot <- function(res, stub, title, n_cat = 15) {
+  if (is.null(res) || nrow(as.data.frame(res)) == 0) return(invisible())
+  p <- dotplot(res, showCategory = n_cat) + ggtitle(title)
+  save_plot(p, sprintf("dotplot_%s.pdf", stub))
+}
+
+## 6.  VISUALISATIONS  --------------------------------------------------------
+
+# 6a. Volcano ---------------------------------------------------------------
+p_volc <- EnhancedVolcano(tbl,
+  lab       = tbl$gene,
+  x         = "logFC",
+  y         = "padj",
+  xlab      = bquote(~Log[2]~" fold change"),
+  pCutoff   = padj_cutoff,
+  FCcutoff  = logFC_cutoff,
+  selectLab = tbl_sig$gene,
+  pointSize = 2, labSize = 3)
+save_plot(p_volc, "volcano_plot.pdf", w = 7, h = 6)
+
+# 6b. Barplot of |logFC| bins (base R) --------------------------------------
+pdf("output/logFC_bins_barplot.pdf", width = 6, height = 4)
+barplot(table(cut(abs(tbl$logFC),
+                  breaks = c(0,1,2,4,8,Inf),
+                  labels = c("<1","1‑2","2‑4","4‑8",">8"))),
+        main = "Distribution of |log2FC|", ylab = "Gene count",
+        xlab = "|log2FC| bins")
+dev.off()
+
+# 6c. UpSet of enriched terms ----------------------------------------------
+if (nrow(as_df(ego)) || nrow(as_df(ekegg)) || nrow(as_df(ereact))) {
+  term_lists <- list()
+  if (nrow(as_df(ego)))   term_lists$GO_BP   <- as_df(ego)$Description
+  if (nrow(as_df(ekegg))) term_lists$KEGG    <- as_df(ekegg)$Description
+  if (nrow(as_df(ereact)))term_lists$Reactome<- as_df(ereact)$Description
+
+  pdf("output/upset_enrichment_terms.pdf", width = 7, height = 5)
+  UpSetR::upset(fromList(term_lists), order.by = "freq",
+                mainbar.y.label = "Shared terms",
+                sets.x.label    = "Term count")
+  dev.off()
+}
+
+# 6d. Cnetplot --------------------------------------------------------------
+if (nrow(as_df(ego))) {
+  p_cnet <- cnetplot(ego, showCategory = 10, node_label = "all")
+  save_plot(p_cnet, "cnetplot_GO_ORA.pdf", w = 9, h = 8)
+}
+
+# 6e. Dotplots --------------------------------------------------------------
+make_dot(ego,      "GO_ORA",      "GO BP ORA")
+make_dot(ekegg,    "KEGG_ORA",    "KEGG ORA")
+make_dot(ereact,   "Reactome_ORA","Reactome ORA")
+make_dot(gsea_go,  "GO_GSEA",     "GO GSEA (preranked)")
+
+## 7.  OPTIONAL: KEGG PATHVIEW  ----------------------------------------------
+if (nrow(as_df(ekegg))) {
+  pathview(gene.data  = setNames(tbl$logFC, tbl$ENTREZID),
+           pathway.id = ekegg$ID[1], species = kegg_code,
+           out.suffix = "logFC", kegg.native = TRUE)
+}
+
+cat("\n✓ All done!  See the 'output/' folder for Excel + plots.\n")
+
+
+```

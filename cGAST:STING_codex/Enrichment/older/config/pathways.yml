@@ -1,0 +1,31 @@
+run_module: true
+organism: "Mus musculus"
+msigdb_categories:
+  - "H"
+include_gene_sets:
+  - "HALLMARK_TNFA_SIGNALING_VIA_NFKB"
+  - "HALLMARK_INFLAMMATORY_RESPONSE"
+  - "HALLMARK_INTERFERON_GAMMA_RESPONSE"
+  - "HALLMARK_INTERFERON_ALPHA_RESPONSE"
+  - "HALLMARK_FATTY_ACID_METABOLISM"
+custom_sets:
+  DAMP_ALARMS: ["HMGB1", "S100A8", "S100A9", "IL33", "HSP90AA1", "HSPA1A", "HSPA1B"]
+  DAMP_SENSING_TLR_RAGE: ["TLR2", "TLR4", "AGER", "MYD88", "TICAM1", "IRAK1", "IRAK4", "TRAF6"]
+  INFLAMMASOME_CORE: ["NLRP3", "PYCARD", "CASP1", "IL1B", "IL18", "GSDMD"]
+  PYROPTOSIS_CORE: ["CASP1", "CASP4", "CASP11", "GSDMD", "IL1B"]
+  NECROPTOSIS_CORE: ["RIPK1", "RIPK3", "MLKL", "TNF", "FADD", "CASP8"]
+  FERROPTOSIS_CORE: ["ACSL4", "SLC7A11", "GPX4", "FTH1", "TFRC"]
+  CGAS_STING_CORE: ["MB21D1", "TMEM173", "TBK1", "IRF3", "IFNB1"]
+fgsea:
+  nperm: 10000
+  minSize: 10
+  maxSize: 500
+  seed: 666
+ssgsea:
+  normalize: true
+plots:
+  top_pathways: 20
+  leading_edge_genes: 30
+run_decoupleR: true
+run_ssgsea: true
+run_fgsea: true

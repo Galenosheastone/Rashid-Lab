@@ -1,0 +1,211 @@
+---
+title: "Bulk RNA-seq Pathway Scoring Notebook"
+output: html_notebook
+---
+
+This notebook runs the same pathway-scoring pipeline as `pathway_scoring.R`, but in an RStudio-friendly format.
+
+How to use it:
+
+1. Open this `.Rmd` file in RStudio.
+2. Put your curated gene-set CSV/TSV/GMT in this folder, or fill in the starter `curated_gene_sets.csv` template.
+3. Edit the `geneset_file` line in the configuration chunk only if you want to point to a different filename.
+4. Run the notebook top to bottom, or click **Knit**.
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+
+analysis_dir <- normalizePath(".", winslash = "/")
+source(file.path(analysis_dir, "pathway_scoring.R"), local = globalenv())
+```
+
+## Configuration
+
+Update the file paths or parameters here as needed. The defaults below match the DESeq2-style avian bulk RNA-seq table already present in this folder.
+
+```{r configuration}
+input_file <- "DESeq2_full_combined_ssRNAseq.csv"
+geneset_file <- "curated_gene_sets_populated.csv"   # Change only if your curated CSV/TSV/GMT has a different filename.
+outdir <- "pathway_scoring_results_notebook"
+
+methods <- c("gsva", "ssgsea", "singscore")
+gene_id_col <- "SYMBOL"
+expr_prefix <- "norm_"
+group_pattern <- "^norm_([A-Za-z]+)_([0-9]+)$"
+
+min_set_size <- 5L
+max_set_size <- 500L
+low_expr_threshold <- 1
+low_expr_min_samples <- 2L
+disable_low_expr_filter <- FALSE
+
+stats_test <- "kruskal"
+pairwise_test <- "none"      # Use "auto", "wilcox", or "t" to calculate pairwise comparisons.
+pairwise_correction <- TRUE  # Set FALSE to report uncorrected pairwise p-values.
+adjust_method <- "BH"
+plot_method_correlation <- FALSE
+boxplot_significance <- TRUE
+```
+
+```{r preflight}
+starter_pathways <- c(
+  "necroptosis",
+  "TNF_NFkB",
+  "TLR_cGAS_STING",
+  "complement",
+  "heterophil_myeloid",
+  "angiogenesis",
+  "osteogenesis",
+  "ECM_remodeling",
+  "sterol_cholesterol_fatty_acid_metabolism",
+  "fracture_healing"
+)
+
+write_starter_geneset_template <- function(path) {
+  starter_tbl <- tibble::tibble(
+    set_name = starter_pathways,
+    gene_symbol = "",
+    direction = "",
+    description = ""
+  )
+  readr::write_csv(starter_tbl, path, na = "")
+}
+
+if (!file.exists(input_file)) {
+  stop("Input file not found: ", input_file)
+}
+
+if (!file.exists(geneset_file)) {
+  candidate_gene_sets <- list.files(
+    path = analysis_dir,
+    pattern = "\\.(csv|tsv|txt|gmt)$",
+    full.names = FALSE,
+    ignore.case = TRUE
+  )
+  candidate_gene_sets <- setdiff(candidate_gene_sets, basename(input_file))
+
+  if (length(candidate_gene_sets) == 1) {
+    geneset_file <- candidate_gene_sets[[1]]
+    message("Auto-detected gene-set file: ", geneset_file)
+  } else if (length(candidate_gene_sets) > 1) {
+    stop(
+      "Multiple candidate gene-set files were found: ",
+      paste(candidate_gene_sets, collapse = ", "),
+      "\nSet 'geneset_file' explicitly in the configuration chunk."
+    )
+  } else {
+    write_starter_geneset_template(geneset_file)
+    stop(
+      "No gene-set file was found, so a starter template was created at: ", geneset_file,
+      "\nFill in the gene_symbol column with your curated pathway genes, then rerun the notebook."
+    )
+  }
+}
+
+if (tolower(tools::file_ext(geneset_file)) != "gmt") {
+  delim <- if (grepl("\\.(tsv|tab|txt)$", tolower(geneset_file))) "\t" else ","
+  reader <- if (identical(delim, "\t")) readr::read_tsv else readr::read_csv
+  gene_set_preview <- reader(geneset_file, show_col_types = FALSE, progress = FALSE)
+  set_name_col <- find_ci_col(names(gene_set_preview), "set_name")
+  gene_symbol_col <- find_ci_col(names(gene_set_preview), "gene_symbol")
+
+  if (is.na(set_name_col) || is.na(gene_symbol_col)) {
+    stop(
+      "Gene-set file must contain columns named set_name and gene_symbol.\n",
+      "Found columns: ", paste(names(gene_set_preview), collapse = ", ")
+    )
+  }
+
+  gene_symbols <- trimws(as.character(gene_set_preview[[gene_symbol_col]]))
+  if (length(gene_symbols) == 0 || all(!nzchar(gene_symbols) | is.na(gene_symbols))) {
+    stop(
+      "The gene-set file exists but the gene_symbol column is still blank.\n",
+      "Either populate ", geneset_file, " with your curated pathway genes,\n",
+      "or change 'geneset_file' in the configuration chunk to point to your real curated CSV/TSV/GMT file."
+    )
+  }
+}
+
+if (!file.exists(geneset_file)) {
+  stop(
+    "Gene-set file not found: ", geneset_file,
+    "\nUpdate 'geneset_file' in the configuration chunk to point to your curated CSV/TSV/GMT file."
+  )
+}
+
+if ("singscore" %in% methods && !requireNamespace("singscore", quietly = TRUE)) {
+  message(
+    "The notebook is configured to run singscore, but the 'singscore' package is not installed.\n",
+    "Install it first, or temporarily set methods <- c(\"gsva\", \"ssgsea\")."
+  )
+}
+```
+
+## Run Pathway Scoring
+
+```{r run-pathway-scoring}
+opts <- build_pathway_scoring_options(
+  input = input_file,
+  genesets = geneset_file,
+  outdir = outdir,
+  methods = methods,
+  gene_id_col = gene_id_col,
+  expr_prefix = expr_prefix,
+  group_pattern = group_pattern,
+  min_set_size = min_set_size,
+  max_set_size = max_set_size,
+  low_expr_threshold = low_expr_threshold,
+  low_expr_min_samples = low_expr_min_samples,
+  disable_low_expr_filter = disable_low_expr_filter,
+  stats_test = stats_test,
+  pairwise_test = pairwise_test,
+  pairwise_correction = pairwise_correction,
+  adjust_method = adjust_method,
+  plot_method_correlation = plot_method_correlation,
+  boxplot_significance = boxplot_significance
+)
+
+results <- run_pathway_scoring(opts)
+```
+
+## Output Summary
+
+```{r output-summary}
+results$output_dirs
+```
+
+```{r output-files}
+unlist(results$output_paths, recursive = TRUE, use.names = TRUE)
+```
+
+## Sample Metadata
+
+```{r sample-metadata}
+knitr::kable(results$sample_metadata)
+```
+
+## Gene-set Coverage
+
+```{r gene-set-coverage}
+knitr::kable(results$coverage)
+```
+
+## Statistics Preview
+
+```{r statistics-preview}
+stats_preview <- purrr::imap_dfr(
+  results$stats,
+  ~ dplyr::mutate(.x, method = .y),
+  .id = NULL
+)
+
+knitr::kable(utils::head(stats_preview, 15))
+```
+
+## Plot Files
+
+The pipeline writes the heatmaps, boxplots, and PCA PDFs into the `plots/` subfolder inside `outdir`.
+
+```{r plot-files}
+list.files(file.path(results$output_dirs$outdir, "plots"), full.names = TRUE)
+```

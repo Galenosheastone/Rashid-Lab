@@ -1,0 +1,198 @@
+---
+title: "Direction_Specific_Visuals"
+author: "Galen O'Shea-Stone"
+date: "2025-06-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+###############################################################################
+##  Direction-specific enrichment visuals (Up vs Down)                       ##
+##  run *after* the main Pygo_gene_enrichment notebook                       ##
+###############################################################################
+
+## 1.  PACKAGES ---------------------------------------------------------------
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+cran_pkgs <- c("readxl", "openxlsx", "dplyr", "ggplot2", "stringr", "glue")
+bio_pkgs  <- c("clusterProfiler", "ReactomePA", "KEGGREST", "org.Gg.eg.db")
+
+for (p in cran_pkgs)
+    if (!requireNamespace(p, quietly = TRUE))
+        install.packages(p, dependencies = TRUE)
+
+for (p in bio_pkgs)
+    if (!requireNamespace(p, quietly = TRUE))
+        BiocManager::install(p, ask = FALSE, update = FALSE)
+
+library(readxl);        library(openxlsx)
+library(dplyr);         library(stringr);     library(ggplot2);   library(glue)
+library(clusterProfiler);  library(ReactomePA);  library(KEGGREST)
+library(org.Gg.eg.db)
+
+orgDb     <- org.Gg.eg.db           # Gallus gallus
+kegg_code <- "gga"                  # change if you use a different species
+
+out_dir   <- "output"
+dir.create(file.path(out_dir, "directional_plots"), showWarnings = FALSE)
+
+## 2.  READ GENE LISTS --------------------------------------------------------
+up_file   <- file.path(out_dir, "up_vs_down_summary.xlsx")
+
+if (!file.exists(up_file))
+    stop("Can’t find ", up_file,
+         "\nMake sure you ran the first notebook and kept its output/ folder.")
+
+up_sig   <- read_xlsx(up_file, sheet = "Up_Genes")
+down_sig <- read_xlsx(up_file, sheet = "Down_Genes")
+
+up_genes   <- unique(up_sig$ENTREZID)
+down_genes <- unique(down_sig$ENTREZID)
+
+gene_universe <- unique(c(up_genes, down_genes))
+
+message("Up genes:   ", length(up_genes))
+message("Down genes: ", length(down_genes))
+
+## 3.  HELPERS ----------------------------------------------------------------
+save_plot <- function(p, fname, w = 7, h = 5)
+  ggsave(filename = file.path(out_dir, "directional_plots", fname),
+         plot = p, width = w, height = h, units = "in")
+
+make_dot_facet <- function(df, stub, title,
+                           n_cat = 15, wrap_width = 45,
+                           w = 7, h = 5) {
+  if (!nrow(df)) return(invisible())
+
+  df <- df %>%
+        arrange(Regulation, p.adjust) %>%
+        slice_head(n = n_cat) %>%
+        mutate(Description = stringr::str_wrap(Description, width = wrap_width))
+
+  ## Work out which x-variable we have (GeneRatio or NES)
+  if (all(c("GeneRatio", "Count") %in% names(df))) {
+      df <- df %>%
+            tidyr::separate(GeneRatio, into = c("g1","g2"),
+                            sep = "/", convert = TRUE) %>%
+            mutate(GeneRatioNum = g1 / g2)
+      x_var <- "GeneRatioNum"; x_lab <- "Gene ratio"; size_var <- "Count"
+  } else {                    # GSEA - style
+      x_var <- "NES";         x_lab <- "NES";       size_var <- "setSize"
+  }
+
+  gg <- ggplot(df, aes_string(x = x_var,
+                              y = paste0("reorder(Description,", x_var, ")"),
+                              size = size_var,
+                              colour = "p.adjust")) +
+        geom_point() +
+        scale_colour_continuous(low = "red", high = "blue", name = "adj-P") +
+        scale_size(range = c(2, 6)) +
+        labs(title = title, x = x_lab, y = NULL) +
+        theme_bw() +
+        facet_wrap(~ Regulation, ncol = 1, scales = "free_y")
+
+  save_plot(gg, glue("dotplot_{stub}_UpDown.pdf"), w, h)
+}
+
+## 4.  ORA  (GO BP, KEGG, Reactome) ------------------------------------------
+# 4a. GO-BP
+ego_up   <- enrichGO(gene = up_genes,   OrgDb = orgDb, keyType = "ENTREZID",
+                     ont = "BP", universe = gene_universe, pAdjustMethod = "BH",
+                     readable = TRUE)
+ego_down <- enrichGO(gene = down_genes, OrgDb = orgDb, keyType = "ENTREZID",
+                     ont = "BP", universe = gene_universe, pAdjustMethod = "BH",
+                     readable = TRUE)
+
+ego_ud <- bind_rows(as.data.frame(ego_up)   %>% mutate(Regulation = "Up"),
+                    as.data.frame(ego_down) %>% mutate(Regulation = "Down"))
+
+make_dot_facet(ego_ud, "GO_ORA", "GO BP ORA (Up vs Down)")
+
+# 4b. KEGG
+message("Fetching KEGG mapping …")
+kmap <- keggLink("pathway", kegg_code)
+
+kegg_term2gene <- data.frame(
+  term = sub("path:",           "", unname(kmap)),
+  gene = sub(paste0(kegg_code, ":"), "", names(kmap)),
+  stringsAsFactors = FALSE
+)
+kdesc <- keggList("pathway", kegg_code)
+kegg_term2name <- data.frame(
+  term = sub("path:", "", names(kdesc)),
+  name = sub(" - .*", "", unname(kdesc)),
+  stringsAsFactors = FALSE
+)
+
+ekegg_up <- enricher(gene = up_genes,   universe = gene_universe,
+                     TERM2GENE = kegg_term2gene, TERM2NAME = kegg_term2name,
+                     pAdjustMethod = "BH")
+ekegg_down <- enricher(gene = down_genes, universe = gene_universe,
+                       TERM2GENE = kegg_term2gene, TERM2NAME = kegg_term2name,
+                       pAdjustMethod = "BH")
+
+ekegg_ud <- bind_rows(
+              as.data.frame(setReadable(ekegg_up,   orgDb, "ENTREZID")) %>%
+                mutate(Regulation = "Up"),
+              as.data.frame(setReadable(ekegg_down, orgDb, "ENTREZID")) %>%
+                mutate(Regulation = "Down")
+            )
+
+make_dot_facet(ekegg_ud, "KEGG_ORA", "KEGG ORA (Up vs Down)")
+
+# 4c. Reactome
+ere_up   <- enrichPathway(gene = up_genes,   universe = gene_universe,
+                          organism = "chicken", pAdjustMethod = "BH",
+                          readable = TRUE)
+ere_down <- enrichPathway(gene = down_genes, universe = gene_universe,
+                          organism = "chicken", pAdjustMethod = "BH",
+                          readable = TRUE)
+
+ere_ud <- bind_rows(as.data.frame(ere_up)   %>% mutate(Regulation = "Up"),
+                    as.data.frame(ere_down) %>% mutate(Regulation = "Down"))
+
+make_dot_facet(ere_ud, "Reactome_ORA", "Reactome ORA (Up vs Down)")
+
+## 5.  GSEA  (faceted by NES sign) -------------------------------------------
+gsea_file <- file.path(out_dir, "enrichment_results_with_genes_and_summary.xlsx")
+
+if (!file.exists(gsea_file))
+    stop("Can’t find ", gsea_file,
+         "\nMake sure the first notebook exported the summary workbook.")
+
+gsea_go <- read_xlsx(gsea_file, sheet = "GO_GSEA")
+
+gsea_ud <- gsea_go %>%
+           mutate(Regulation = ifelse(NES > 0, "Up", "Down"))
+
+make_dot_facet(gsea_ud, "GO_GSEA", "GO GSEA (Up vs Down)",
+               n_cat = 20, w = 8, h = 6)
+
+## 6.  Optional: simple bar-plot of term counts -------------------------------
+term_counts <- gsea_ud %>%
+               count(Regulation, name = "Pathways")
+
+gg_counts <- ggplot(term_counts,
+                    aes(x = Regulation, y = Pathways, fill = Regulation)) +
+             geom_col(width = 0.6) +
+             geom_text(aes(label = Pathways), vjust = -0.3) +
+             labs(title = "Number of GSEA pathways by direction",
+                  y = "Pathway count", x = NULL) +
+             theme_bw()
+
+save_plot(gg_counts, "gsea_pathway_direction_counts.pdf", 5, 4)
+
+message("\n✓ Direction-specific plots saved to  ",
+        file.path(out_dir, "directional_plots"))
+
+
+
+
+
+```

@@ -1,0 +1,239 @@
+---
+title: "Pathway Mapper v3 — Control Notebook"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+# Overview
+
+This notebook controls `pathway_mapper_v3.R`. It sources the script, lets
+you configure inputs and options, and runs pathway maps individually or in
+batch. All output files land in the directory you set in **Section 2**.
+
+---
+
+# 1. Source the script
+
+Run this chunk first every session. It loads all functions and the pathway
+registry into your environment.
+
+```{r source}
+source("pathway_mapper_v3.R")
+```
+
+---
+
+# 2. Configure inputs
+
+Edit these three variables. Everything else in the notebook reads from them.
+
+```{r config}
+# ── Required ──────────────────────────────────────────────────────────────
+INPUT_CSV <- "DESeq2_GRCg7b_Sacral_vs_Free_by_ENS.csv"  # path to DESeq2 CSV
+OUTDIR    <- "pathway_out"                                # output directory
+TITLE     <- "Sacral vs Free"                             # plot title prefix
+
+# ── Optional ──────────────────────────────────────────────────────────────
+P_CUTOFF  <- 0.05                                   # significance threshold
+LFC_COLS  <- c("log2FC_shrunken", "log2FC")         # fold-change column priority
+ID_COLS   <- c("ensembl_id", "Unnamed: 0", "gene", "id")  # Ensembl ID column candidates
+```
+
+> **Tip:** Use `file.choose()` in the console to pick a file interactively,
+> then paste the path above.
+
+---
+
+# 3. List available pathways
+
+```{r list-pathways}
+list_pathways()
+```
+
+---
+
+# 4. Run a single pathway
+
+Change `PATHWAY` to any name from `list_pathways()`.
+
+```{r single-pathway}
+PATHWAY <- "cgas_sting"   # ← change this
+
+run_pathway_maps(
+  input    = INPUT_CSV,
+  outdir   = OUTDIR,
+  title    = TITLE,
+  pathways = PATHWAY,
+  p_cutoff = P_CUTOFF,
+  lfc_column_preference = LFC_COLS,
+  id_column_candidates  = ID_COLS,
+  stitch_panels = FALSE   # no overview grid when running just one pathway
+)
+```
+
+---
+
+# 5. Run a custom selection of pathways
+
+```{r multi-pathway}
+MY_PATHWAYS <- c("apoptosis", "necroptosis")
+
+run_pathway_maps(
+  input    = INPUT_CSV,
+  outdir   = OUTDIR,
+  title    = TITLE,
+  pathways = MY_PATHWAYS,
+  p_cutoff = P_CUTOFF,
+  lfc_column_preference = LFC_COLS,
+  id_column_candidates  = ID_COLS,
+  stitch_panels = TRUE   # saves all_pathways_overview.png
+)
+```
+
+---
+
+# 6. Run all pathways
+
+Renders every pathway in the registry and stitches them into
+`all_pathways_overview.png`.
+
+```{r all-pathways}
+run_pathway_maps(
+  input    = INPUT_CSV,
+  outdir   = OUTDIR,
+  title    = TITLE,
+  pathways = list_pathways(),
+  p_cutoff = P_CUTOFF,
+  lfc_column_preference = LFC_COLS,
+  id_column_candidates  = ID_COLS,
+  stitch_panels = TRUE
+)
+```
+
+---
+
+# 7. Preview outputs inline
+
+After running any section above, use these chunks to view the results
+directly in the notebook.
+
+## Individual pathway map
+
+```{r preview-map, fig.width=14, fig.height=7.5}
+PREVIEW_PATHWAY <- "cgas_sting"   # ← change to whichever pathway you want
+
+cfg         <- get_pathway_config(PREVIEW_PATHWAY)
+prepared_de <- prepare_de_table_for_pathways(
+  input                 = INPUT_CSV,
+  lfc_column_preference = LFC_COLS,
+  id_column_candidates  = ID_COLS
+)
+
+result <- render_pathway_map(
+  config                       = cfg,
+  prepared_de                  = prepared_de,
+  outdir                       = OUTDIR,
+  title                        = TITLE,
+  p_cutoff                     = P_CUTOFF,
+  show_compartments            = TRUE,
+  min_nodes_per_compartment    = 2,
+  force_singleton_compartments = c("Plasma membrane", "ER/Golgi"),
+  return_plot                  = TRUE
+)
+
+result$plot
+```
+
+## Interpretation panel
+
+```{r preview-panel, fig.width=6, fig.height=7.5}
+make_interpretation_panel(
+  nodes_annot      = result$node_tbl,
+  edges_cfg        = cfg$edges,
+  title            = paste0(cfg$display_name, " \u2014 Interpretation"),
+  validation_notes = cfg$validation_notes
+)
+```
+
+## Node table
+
+```{r preview-nodes}
+result$node_tbl |>
+  dplyr::select(node_id, label, module, compartment,
+                log2FC_used, padj, node_status) |>
+  dplyr::arrange(node_status, dplyr::desc(abs(log2FC_used))) |>
+  knitr::kable(digits = 3)
+```
+
+## Missing genes
+
+```{r preview-missing}
+missing <- result$node_tbl |>
+  dplyr::filter(node_status == "Missing gene") |>
+  dplyr::select(node_id, label, module, compartment)
+
+if (nrow(missing) == 0) {
+  cat("No missing genes — all pathway nodes matched in dataset.\n")
+} else {
+  knitr::kable(missing)
+}
+```
+
+---
+
+# 8. Inspect a pathway config
+
+Useful for checking node positions, edge wiring, or synonyms before
+running a map.
+
+```{r inspect-config}
+INSPECT <- "inflammasome"   # ← change to any pathway name
+
+cfg <- get_pathway_config(INSPECT)
+
+cat("=== Pathway:", cfg$display_name, "===\n\n")
+cat("Nodes (", nrow(cfg$nodes), "):\n")
+print(cfg$nodes)
+
+cat("\nEdges (", nrow(cfg$edges), "):\n")
+print(cfg$edges)
+
+cat("\nSynonyms:\n")
+print(cfg$synonyms)
+
+cat("\nValidation notes:\n")
+cat(paste0("  - ", cfg$validation_notes, collapse = "\n"), "\n")
+```
+
+---
+
+# 9. List output files
+
+```{r list-outputs}
+if (dir.exists(OUTDIR)) {
+  files <- list.files(OUTDIR, full.names = FALSE)
+  data.frame(file = sort(files)) |> knitr::kable()
+} else {
+  cat("Output directory does not exist yet — run a pathway first.\n")
+}
+```
+
+---
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```

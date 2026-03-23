@@ -1,0 +1,13 @@
+sample,group,replicate,sample_order
+norm_Sacral_1,Sacral,1,1
+norm_Free_1,Free,1,2
+norm_Free_2,Free,2,3
+norm_Sacral_2,Sacral,2,4
+norm_Pygo_1,Pygo,1,5
+norm_Sacral_3,Sacral,3,6
+norm_Sacral_4,Sacral,4,7
+norm_Free_3,Free,3,8
+norm_Pygo_2,Pygo,2,9
+norm_Free_4,Free,4,10
+norm_Pygo_3,Pygo,3,11
+norm_Pygo_4,Pygo,4,12

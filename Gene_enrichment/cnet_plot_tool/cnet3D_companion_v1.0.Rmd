@@ -1,0 +1,127 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+################################################################################
+##  prettier_3d_cnet.R – interactive 3-D cnet plots with sensible aesthetics  ##
+################################################################################
+
+## 0. Packages ----
+cran_pkgs <- c("threejs", "igraph", "htmlwidgets", "RColorBrewer", "scales")
+bio_pkgs  <- c("clusterProfiler")        # just for the enrichResult classes
+for (p in c(cran_pkgs, bio_pkgs))
+  if (!requireNamespace(p, quietly = TRUE))
+    if (p %in% cran_pkgs) install.packages(p) else BiocManager::install(p)
+
+library(threejs)
+library(igraph)
+library(htmlwidgets)
+library(RColorBrewer)
+library(scales)
+
+## 1. Load saved enrichment bundle ----
+obj    <- readRDS("output/enrichment_objects.rds")
+ego    <- obj$ego
+ekegg  <- obj$ekegg
+ereact <- obj$ereact
+fc_vec <- obj$fc_vec      # named numeric, ENTREZ → log2FC (can be empty)
+
+## 2. Helper: build + save an improved 3-D plot ----
+make_pretty_cnet <- function(enrich_res,
+                             fc         = NULL,
+                             showCat    = 15,
+                             out_html   = "cnet3d.html",
+                             seed       = 1L) {
+
+  if (is.null(enrich_res) || nrow(as.data.frame(enrich_res)) == 0) {
+    message("• Skipped empty enrichment result.")
+    return(invisible(NULL))
+  }
+
+  ## 2a. Trim to top N terms (adj-P) ----
+  res_df <- as.data.frame(enrich_res)[order(enrich_res@result$p.adjust), ]
+  res_df <- head(res_df, showCat)
+  term_nodes <- res_df$Description
+
+  ## 2b. Edge list term ↔ gene ----
+  edge_df <- lapply(seq_len(nrow(res_df)), function(i) {
+    genes <- strsplit(res_df$geneID[i], "/")[[1]]
+    data.frame(from = res_df$Description[i], to = genes, stringsAsFactors = FALSE)
+  }) |> do.call(rbind)
+
+  ## 2c. igraph object & 3-D layout ----
+  g <- graph_from_data_frame(edge_df, directed = FALSE)
+  set.seed(seed)
+  coords <- layout_with_drl(g, options = list(dimension = 3))
+
+  ## 2d. Vertex attributes ----
+  V(g)$type   <- ifelse(V(g)$name %in% term_nodes, "term", "gene")
+
+  # Colour palette for genes: blue (down) → white → red (up)
+  pal <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+
+  gene_fc <- fc[V(g)$name]
+  gene_col <- pal[findInterval(rescale(gene_fc, to = c(1, 100),
+                                       from = range(gene_fc, na.rm = TRUE)),
+                               1:100)]
+  gene_col[is.na(gene_col)] <- "#B3B3B3"
+
+  V(g)$color <- ifelse(V(g)$type == "term", "#E5C494", gene_col)
+
+  ## Size: term by gene count; gene by |logFC|
+  V(g)$size <- ifelse(
+    V(g)$type == "term",
+    rescale(res_df$Count[match(V(g)$name, term_nodes)], to = c(10, 24)),
+    rescale(abs(gene_fc),                       to = c(4, 12))
+  )
+  V(g)$size[is.na(V(g)$size)] <- 4  # genes lacking FC
+
+  ## Labels & tooltips ----
+  V(g)$label <- ifelse(V(g)$type == "term", V(g)$name, "")
+  V(g)$tooltip <- ifelse(
+    V(g)$type == "term",
+    paste0(V(g)$name, "\nGenes: ", res_df$Count[match(V(g)$name, term_nodes)]),
+    paste0(V(g)$name,
+           ifelse(!is.na(gene_fc[V(g)$name]),
+                  sprintf("\nlog2FC: %.2f", gene_fc[V(g)$name]),
+                  ""))
+  )
+
+  ## 2e. Render ----
+  widget <- graphjs(
+    g,
+    layout        = coords,
+    vertex.size   = V(g)$size,
+    vertex.color  = V(g)$color,
+    vertex.label  = V(g)$label,
+    vertex.tooltip = V(g)$tooltip,
+    edge.width    = 0.3,
+    edge.color    = "#AAAAAA",
+    bg            = "white"
+  )
+
+  dir.create(dirname(out_html), showWarnings = FALSE, recursive = TRUE)
+  saveWidget(widget, out_html, selfcontained = TRUE)
+  message("✓ Saved interactive 3-D cnet → ", out_html)
+}
+
+## 3. Generate plots ----
+dir.create("output/3d_cnet_pretty", showWarnings = FALSE)
+
+make_pretty_cnet(ego,    fc_vec, showCat = 15,
+                 out_html = "output/3d_cnet_pretty/cnet3d_GO_ORA.html")
+make_pretty_cnet(ekegg,  fc_vec, showCat = 15,
+                 out_html = "output/3d_cnet_pretty/cnet3d_KEGG_ORA.html")
+make_pretty_cnet(ereact, fc_vec, showCat = 15,
+                 out_html = "output/3d_cnet_pretty/cnet3d_Reactome_ORA.html")
+
+message("\nOpen the HTML files and explore:\n",
+        " • drag = rotate • scroll = zoom • hover = tooltip")
+
+```
+
+
+

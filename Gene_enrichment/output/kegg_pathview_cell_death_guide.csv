@@ -1,0 +1,4 @@
+"Pathway_ID","Description","PNG_File","PDF_File"
+"gga04210","Apoptosis","pathview/gga04210.logFC_apoptosis.png","pathview/gga04210.logFC_apoptosis.pdf"
+"gga04217","Necroptosis","pathview/gga04217.logFC_necroptosis.png","pathview/gga04217.logFC_necroptosis.pdf"
+"gga04225","Pyroptosis","pathview/gga04225.logFC_pyroptosis.png","pathview/gga04225.logFC_pyroptosis.pdf"

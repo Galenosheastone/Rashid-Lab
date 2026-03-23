@@ -1,0 +1,1 @@
+KEGG mappings fetched: 2026-02-20

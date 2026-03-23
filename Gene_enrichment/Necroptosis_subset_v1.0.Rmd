@@ -1,0 +1,355 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+# necroptosis_followup.R
+# Run AFTER your main enrichment Rmd. Focuses analyses/plots on "Necroptosis".
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(openxlsx)
+  library(clusterProfiler)
+  library(enrichplot)
+  library(AnnotationDbi)
+  library(org.Gg.eg.db)
+  library(KEGGREST)
+  library(pathview)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(glue)
+  library(grid)
+})
+
+# -----------------------------------------------------------------------------
+# 0) Inputs / output
+# -----------------------------------------------------------------------------
+in_rds <- "output/enrichment_objects.rds"
+if (!file.exists(in_rds)) stop("Missing ", in_rds, ". Run the main script first.")
+
+objs <- readRDS(in_rds)
+# expected in objs: ego, ekegg, ereact, gsea_go, gsea_go_MF, gsea_kegg, fc_vec
+
+outdir <- file.path("output", "necroptosis")
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+# KEGG organism code (adjust if needed)
+kegg_code <- "gga"
+
+# optional: global theme
+theme_set(theme_bw(base_size = 11))
+
+# SVG saver guard (avoid svglite dependency issues)
+save_plot <- local({
+  can_svg <- suppressWarnings(requireNamespace("svglite", quietly = TRUE))
+  function(p, fname, w = 7, h = 5){
+    fpdf <- file.path(outdir, fname)
+    ggsave(fpdf, plot = p, width = w, height = h, units = "in", dpi = 300)
+    if (grepl("\\.pdf$", fname) && isTRUE(can_svg)) {
+      fsvg <- file.path(outdir, sub("\\.pdf$", ".svg", fname))
+      ggsave(fsvg, plot = p, width = w, height = h, units = "in", dpi = 300)
+    }
+  }
+})
+
+# -----------------------------------------------------------------------------
+# 1) Helpers & pattern
+# -----------------------------------------------------------------------------
+as_df <- function(res, id_col = "geneID"){
+  if (is.null(res)) return(tibble::tibble())
+  df <- as.data.frame(res)
+  if (nrow(df) == 0) return(tibble::tibble())
+  if (!id_col %in% names(df)) return(df)   # don't rename if column absent
+  dplyr::rename(df, Genes = !!id_col)
+}
+
+make_dot <- function(res, stub, title, n_cat=15, wrap_width=60,
+                     text_size=9, text_angle=0, w=7, h=5){
+  df <- as.data.frame(res); if (nrow(df) == 0) return(invisible())
+  df <- df[seq_len(min(n_cat, nrow(df))), ]
+  df$Description <- stringr::str_wrap(df$Description, width = wrap_width)
+
+  if (all(c("GeneRatio","Count") %in% names(df))) {
+    df$GeneRatioNum <- vapply(strsplit(df$GeneRatio, "/"),
+                              function(x) as.numeric(x[1])/as.numeric(x[2]),
+                              numeric(1))
+    x_var <- "GeneRatioNum"; x_lab <- "Gene ratio"; size_var <- "Count"
+  } else if (all(c("NES","setSize") %in% names(df))) {
+    x_var <- "NES"; x_lab <- "NES"; size_var <- "setSize"
+  } else return(invisible())
+
+  p <- ggplot(df, aes_string(x=x_var, y=paste0("reorder(Description,",x_var,")"),
+                             size=size_var, colour="p.adjust")) +
+    geom_point() +
+    scale_colour_continuous(trans="reverse", name="adj-P") +
+    scale_size(range=c(2,6)) +
+    labs(title=title, x=x_lab, y=NULL) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size=text_size, angle=text_angle,
+                                     hjust=ifelse(text_angle==0,1,0.5)))
+  save_plot(p, sprintf("dotplot_%s.pdf", stub), w, h)
+}
+
+# pattern for matching
+necro_kw <- c("necroptosis", "necroptotic", "programmed necrosis")
+necro_pattern <- paste(necro_kw, collapse = "|")
+
+# Map ENTREZ → SYMBOL for readability in exports
+orgDb <- org.Gg.eg.db
+entrex_ids <- names(objs$fc_vec)
+sym_map <- tryCatch(
+  AnnotationDbi::select(orgDb, keys = entrex_ids, columns = c("SYMBOL"), keytype = "ENTREZID"),
+  error = function(e) data.frame(ENTREZID = entrex_ids, SYMBOL = NA_character_)
+)
+sym_map <- sym_map %>% distinct(ENTREZID, .keep_all = TRUE)
+
+# -----------------------------------------------------------------------------
+# 2) Subset "Necroptosis" across results
+# -----------------------------------------------------------------------------
+ego_df        <- as_df(objs$ego)                 # GO BP ORA (has geneID)
+ekegg_df      <- as_df(objs$ekegg)               # KEGG ORA (has geneID)
+ereact_df     <- as_df(objs$ereact)              # Reactome ORA (has geneID)
+
+# GSEA tables use 'core_enrichment' instead of 'geneID'
+gsea_go_df    <- as_df(objs$gsea_go,    id_col = "core_enrichment")
+gsea_mf_df    <- as_df(objs$gsea_go_MF, id_col = "core_enrichment")
+gsea_kegg_df  <- as_df(objs$gsea_kegg,  id_col = "core_enrichment")
+
+# For filtering, operate on raw frames from the objects (to keep all columns)
+ego_df_raw    <- as.data.frame(objs$ego)
+ekegg_df_raw  <- as.data.frame(objs$ekegg)
+ereact_df_raw <- as.data.frame(objs$ereact)
+
+pick_necro <- function(df){
+  if (is.null(df) || nrow(df) == 0 || !("Description" %in% colnames(df))) return(df[0,])
+  df[grepl(necro_pattern, df$Description, ignore.case = TRUE), , drop = FALSE]
+}
+
+necro_GO_ORA    <- pick_necro(ego_df_raw)
+necro_KEGG_ORA  <- pick_necro(ekegg_df_raw)
+necro_REACT     <- pick_necro(ereact_df_raw)
+necro_GO_GSEA   <- pick_necro(as.data.frame(objs$gsea_go))
+necro_MF_GSEA   <- pick_necro(as.data.frame(objs$gsea_go_MF))
+necro_KEGG_GSEA <- pick_necro(as.data.frame(objs$gsea_kegg))
+
+# -----------------------------------------------------------------------------
+# 3) Dotplots focused on necroptosis
+# -----------------------------------------------------------------------------
+if (nrow(necro_GO_ORA)  > 0) make_dot(necro_GO_ORA,   "GO_ORA_NECRO",   "Necroptosis (GO-BP ORA)")
+if (nrow(necro_KEGG_ORA)> 0) make_dot(necro_KEGG_ORA, "KEGG_ORA_NECRO", "Necroptosis (KEGG ORA)")
+if (nrow(necro_REACT)   > 0) make_dot(necro_REACT,    "REACT_NECRO",    "Necroptosis (Reactome ORA)")
+
+if (nrow(necro_GO_GSEA)   > 0) make_dot(necro_GO_GSEA,   "GO_GSEA_NECRO",    "Necroptosis (GO-BP GSEA)")
+if (nrow(necro_MF_GSEA)   > 0) make_dot(necro_MF_GSEA,   "GO_MF_GSEA_NECRO", "Necroptosis (GO-MF GSEA)")
+if (nrow(necro_KEGG_GSEA) > 0) make_dot(necro_KEGG_GSEA, "KEGG_GSEA_NECRO",  "Necroptosis (KEGG GSEA)")
+
+# -----------------------------------------------------------------------------
+# 4) Ridgeplot / GSEA running plots for necroptosis terms (GO BP)
+# -----------------------------------------------------------------------------
+if (nrow(necro_GO_GSEA) >= 1) {
+  necro_ids <- necro_GO_GSEA$ID
+  rows <- which(objs$gsea_go@result$ID %in% necro_ids)
+  if (length(rows) >= 1) {
+    gsea_go_necro <- objs$gsea_go
+    gsea_go_necro@result <- gsea_go_necro@result[rows, , drop = FALSE]
+
+    # Ridgeplot if at least 3 terms
+    if (nrow(gsea_go_necro@result) >= 3) {
+      pdf(file.path(outdir, "ridgeplot_GO_GSEA_NECRO.pdf"), 7, 0.5 * nrow(gsea_go_necro@result) + 2)
+      print(enrichplot::ridgeplot(gsea_go_necro, showCategory = nrow(gsea_go_necro@result)) +
+              labs(x="Enrichment score (NES)", y=NULL) +
+              theme(axis.text.y = element_text(size=10)))
+      dev.off()
+    }
+
+    # Running score plots for up to 3 necro terms
+    pdf(file.path(outdir, "gsea_running_score_NECRO.pdf"), 9, 6)
+    for (id in head(gsea_go_necro@result$ID, 3)) {
+      print(enrichplot::gseaplot2(objs$gsea_go, geneSetID = id))
+    }
+    dev.off()
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5) cnetplot (necro ORA) + Heatmap of necro genes (from ORA + GSEA)
+# -----------------------------------------------------------------------------
+fc_vec <- objs$fc_vec
+
+# cnet requires at least two terms
+if (nrow(necro_GO_ORA) > 1) {
+  ego_necro <- objs$ego
+  ego_necro@result <- dplyr::filter(ego_necro@result, ID %in% necro_GO_ORA$ID)
+  p <- cnetplot(ego_necro, showCategory = min(10, nrow(ego_necro@result)),
+                foldChange = fc_vec, node_label = "all") +
+       ggtitle("GO-BP cnetplot (Necroptosis subset)")
+  save_plot(p, "cnetplot_GO_ORA_NECRO.pdf", 9, 8)
+}
+
+# Gather necro genes from ORA + GSEA
+necro_gene_vec <- unique(unlist(strsplit(
+  c(necro_GO_ORA$geneID,
+    if ("core_enrichment" %in% colnames(necro_GO_GSEA))
+      necro_GO_GSEA$core_enrichment else NULL),
+  "/")))
+necro_gene_vec <- necro_gene_vec[!is.na(necro_gene_vec) & nzchar(necro_gene_vec)]
+
+# Heatmap of logFC for necro genes
+if (length(necro_gene_vec) > 0) {
+  common_entrez <- intersect(names(fc_vec), necro_gene_vec)
+  if (length(common_entrez) > 0) {
+    mat <- matrix(fc_vec[common_entrez], nrow = 1,
+                  dimnames = list(NULL, common_entrez))
+    # add SYMBOL labels if available
+    lab_map <- sym_map %>% filter(ENTREZID %in% common_entrez)
+    colnames(mat) <- ifelse(colnames(mat) %in% lab_map$ENTREZID,
+                            lab_map$SYMBOL[match(colnames(mat), lab_map$ENTREZID)],
+                            colnames(mat))
+    col_fun <- circlize::colorRamp2(
+      c(-max(abs(mat)), 0, max(abs(mat))),
+      c("royalblue", "white", "firebrick"))
+    pdf(file.path(outdir, "heatmap_NECRO_gene_logFC.pdf"), 8, 2.8)
+    ComplexHeatmap::Heatmap(mat, name = "log2FC", col = col_fun,
+                            cluster_columns = TRUE, show_row_names = FALSE,
+                            column_names_gp = grid::gpar(fontsize = 7))
+    dev.off()
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6) KEGG Necroptosis pathway diagrams (Pathview)
+# -----------------------------------------------------------------------------
+# Prefer IDs from KEGG ORA/GSEA subset; else, search KEGG for "Necroptosis".
+kegg_necro_ids <- character(0)
+if (nrow(necro_KEGG_ORA)  > 0) kegg_necro_ids <- unique(c(kegg_necro_ids, necro_KEGG_ORA$ID))
+if (nrow(necro_KEGG_GSEA) > 0) kegg_necro_ids <- unique(c(kegg_necro_ids, necro_KEGG_GSEA$ID))
+kegg_necro_ids <- unique(kegg_necro_ids)
+
+if (length(kegg_necro_ids) == 0) {
+  kdesc <- tryCatch(KEGGREST::keggList("pathway", kegg_code), error=function(e) NULL)
+  if (!is.null(kdesc)) {
+    all_terms <- data.frame(
+      term = sub("path:", "", names(kdesc)),
+      name = unname(kdesc),
+      stringsAsFactors = FALSE
+    )
+    kegg_necro_ids <- all_terms$term[grepl("Necroptosis", all_terms$name, ignore.case = TRUE)]
+  }
+}
+
+if (length(kegg_necro_ids) > 0) {
+  kegg_outdir <- file.path(outdir, "pathview_necroptosis")
+  dir.create(kegg_outdir, showWarnings = FALSE, recursive = TRUE)
+
+  for (pid in kegg_necro_ids) {
+    clean_id <- sub(paste0("^", kegg_code), "", pid)  # pathview expects numeric part
+    message("Pathview: rendering ", pid)
+    old_wd <- getwd(); setwd(kegg_outdir)
+    tryCatch({
+      pathview(gene.data = fc_vec, pathway.id = clean_id, species = kegg_code,
+               out.suffix = "logFC_necro", kegg.native = TRUE)
+    }, error=function(e){
+      message("Pathview error for ", pid, ": ", e$message)
+    })
+    setwd(old_wd)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 7) Leading-edge details for necro GSEA (GO BP) with direction bars
+# -----------------------------------------------------------------------------
+if (nrow(necro_GO_GSEA) > 0 && "core_enrichment" %in% colnames(necro_GO_GSEA)) {
+  le_necro <- necro_GO_GSEA %>%
+    tidyr::separate_rows(core_enrichment, sep = "/") %>%
+    dplyr::rename(ENTREZID = core_enrichment) %>%
+    dplyr::mutate(logFC = as.numeric(fc_vec[ENTREZID])) %>%
+    dplyr::left_join(sym_map, by = "ENTREZID") %>%
+    dplyr::mutate(gene_label = dplyr::coalesce(SYMBOL, ENTREZID)) %>%
+    dplyr::mutate(Direction = dplyr::case_when(
+      is.na(logFC) ~ "NA",
+      logFC > 0 ~ "Up",
+      logFC < 0 ~ "Down",
+      TRUE ~ "Neutral"
+    ))
+
+  # Export details
+  openxlsx::write.xlsx(le_necro, file = file.path(outdir, "necro_GSEA_leading_edge.xlsx"), overwrite = TRUE)
+
+  # Stacked bar per term (if multiple)
+  if (nrow(le_necro) > 0) {
+    p_dir <- ggplot(le_necro %>% filter(Direction != "NA"),
+                    aes(x = reorder(Description, NES), fill = Direction)) +
+      geom_bar() +
+      coord_flip() +
+      labs(title = "Direction of leading-edge genes (Necroptosis GSEA terms)",
+           y = "Leading-edge genes", x = NULL) +
+      scale_fill_manual(values = c(Up = "firebrick", Down = "forestgreen", Neutral = "grey70")) +
+      theme_bw(base_size = 10)
+    save_plot(p_dir, "gsea_necro_leading_edge_direction_bars.pdf", 8,
+              0.4 * dplyr::n_distinct(le_necro$Description) + 2)
+
+    # Gene bars for top term (by |NES|)
+    top_term <- le_necro %>% dplyr::arrange(dplyr::desc(abs(NES))) %>% dplyr::pull(ID) %>% .[1]
+    if (!is.na(top_term)) {
+      top_df <- le_necro %>% filter(ID == top_term, !is.na(logFC)) %>%
+        arrange(desc(abs(logFC))) %>% head(25)
+      if (nrow(top_df) > 0) {
+        p <- ggplot(top_df, aes(x = reorder(gene_label, logFC), y = logFC, fill = logFC)) +
+          geom_col() + coord_flip() +
+          labs(title = glue("Leading-edge genes: {unique(top_df$Description)}"),
+               x = "Gene symbol", y = "log2 fold change") +
+          theme_bw(base_size = 11) +
+          scale_fill_gradient2(low = "royalblue", mid = "white", high = "firebrick")
+        save_plot(p, "gsea_leading_edge_top_NECRO.pdf", 8, 5)
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 8) Workbook summary
+# -----------------------------------------------------------------------------
+wb <- createWorkbook()
+add <- function(sheet, df){
+  addWorksheet(wb, sheet)
+  if (is.null(df) || nrow(as.data.frame(df)) == 0) {
+    writeData(wb, sheet, data.frame(Note = "No results"))
+  } else writeData(wb, sheet, df)
+}
+
+add("GO_BP_ORA_necro",    necro_GO_ORA)
+add("KEGG_ORA_necro",     necro_KEGG_ORA)
+add("Reactome_ORA_necro", necro_REACT)
+add("GO_BP_GSEA_necro",   necro_GO_GSEA)
+add("GO_MF_GSEA_necro",   necro_MF_GSEA)
+add("KEGG_GSEA_necro",    necro_KEGG_GSEA)
+
+necro_summary <- data.frame(
+  Set      = c("GO-BP ORA","KEGG ORA","Reactome ORA","GO-BP GSEA","GO-MF GSEA","KEGG GSEA"),
+  N_terms  = c(nrow(necro_GO_ORA), nrow(necro_KEGG_ORA), nrow(necro_REACT),
+               nrow(necro_GO_GSEA), nrow(necro_MF_GSEA), nrow(necro_KEGG_GSEA)),
+  Top_term = c(na.omit(necro_GO_ORA$Description)[1],
+               na.omit(necro_KEGG_ORA$Description)[1],
+               na.omit(necro_REACT$Description)[1],
+               na.omit(necro_GO_GSEA$Description)[1],
+               na.omit(necro_MF_GSEA$Description)[1],
+               na.omit(necro_KEGG_GSEA$Description)[1]),
+  stringsAsFactors = FALSE
+)
+add("Summary", necro_summary)
+
+saveWorkbook(wb, file.path(outdir, "necroptosis_summary.xlsx"), overwrite = TRUE)
+
+# -----------------------------------------------------------------------------
+# 9) Done
+# -----------------------------------------------------------------------------
+writeLines(capture.output(sessionInfo()), file.path(outdir, "sessionInfo_necroptosis.txt"))
+cat("\n✓ Necroptosis follow-up complete — see '", outdir, "'\n", sep = "")
+
+
+```
+

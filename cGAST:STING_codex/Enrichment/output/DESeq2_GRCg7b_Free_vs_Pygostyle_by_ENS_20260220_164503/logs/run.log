@@ -1,0 +1,28 @@
+
+====== SUMMARY ======
+Input genes: 12227
+Mapped genes: 12360
+Unmapped: -133
+Universe: 12090
+Test set: 3934 (32.5%)
+null device 
+          1 
+null device 
+          1 
+[1] "Note: 1 of 46 unique input IDs unmapped."
+[1] "Note: 1 of 73 unique input IDs unmapped."
+[1] "Note: 1 of 46 unique input IDs unmapped."
+[1] "Note: 4 of 105 unique input IDs unmapped."
+[1] "Note: 1 of 182 unique input IDs unmapped."
+
+All done.
+Run root: output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503
+Key files:
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/tables/RESULTS.xlsx
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/plots/volcano/volcano_all.pdf
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/widgets/sankey_genes_kegg.html
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/tables/signatures/hallmark_fgsea_all.xlsx
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/tables/activity/tf_activity_ulm.xlsx
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/r_objects/enrichment_objects.rds
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/logs/run.log
+  - output/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_20260220_164503/OUTPUT_MANIFEST.csv

@@ -1,0 +1,45 @@
+# Main output location.
+output_dir: outputs
+
+# Required counts matrix.
+counts_file: Sacral24_realigned_GRCg7b_counts_matchedIDs_MAIN_forDESeq2.csv
+
+# Optional metadata table. If omitted or missing, set infer_metadata_from_sample_names: true
+# to build condition labels from sample names.
+metadata_file: GRCg7b_metadata_CLEAN.csv
+
+# Leave null to auto-pick Free when present, otherwise the first available condition level.
+ref_level: null
+
+results_alpha: 0.05
+
+# Filter modes:
+# - legacy: keep genes with >0 reads in at least one sample
+# - strict: keep genes with >= min_count reads in >= min_reps_within_group samples within at least one condition
+filter_mode: strict
+min_count: 10
+min_reps_within_group: 3
+
+# Variance-stabilizing transformation for QC.
+use_rlog: false
+
+# Model options.
+run_lrt: true
+run_gsea: true
+OrgDb_pkg: org.Gg.eg.db
+kegg_org: gga
+shrink_method: apeglm
+n_workers: 4
+
+# Input cleaning behavior.
+infer_metadata_from_sample_names: false
+allow_condition_aliases: false
+
+# Requested pairwise contrasts.
+contrast_plan:
+  - group1: Sacral
+    group0: Free
+  - group1: Pygo
+    group0: Free
+  - group1: Sacral
+    group0: Pygo

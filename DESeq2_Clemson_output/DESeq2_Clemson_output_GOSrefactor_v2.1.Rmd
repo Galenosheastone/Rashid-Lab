@@ -1,0 +1,261 @@
+---
+title: "DESeq2_Clemson_output – full QC + stats (2025‑06‑30)"
+author: "Rooksie Noorai (orig) → Galen O'Shea‑Stone (refactor + QC)"
+date: "2025‑06‑30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(666)
+output_dir <- "deseq2_outputs"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+```
+
+## 1  Load libraries
+```{r libs}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+# Core analysis packages ------------------------------------------------
+core_pkgs <- c("DESeq2", "apeglm", "AnnotationDbi", "org.Gg.eg.db")
+for (pkg in core_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    BiocManager::install(pkg, ask = FALSE)
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+# QC / visualisation packages ------------------------------------------
+qc_pkgs <- c("ggplot2", "pheatmap", "vsn")
+for (pkg in qc_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    BiocManager::install(pkg, ask = FALSE)
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+# core analysis libs (install first run only)
+# BiocManager::install(c("DESeq2","apeglm","clusterProfiler","enrichplot",
+#                        "org.Gg.eg.db","AnnotationDbi","pathview",
+#                        "pheatmap","vsn"), ask = FALSE)
+
+library(DESeq2)
+library(apeglm)
+library(AnnotationDbi)
+library(org.Gg.eg.db)
+
+# visualisation / QC helper libraries
+Libraries <- c("ggplot2", "pheatmap", "vsn")
+for (pkg in Libraries)
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+```
+
+## 2  Read counts & metadata
+```{r read-counts}
+Expression <- read.delim("redo.ensembl.stranded.counts.renamed.subset.txt")
+rownames(Expression) <- Expression$Geneid
+cts <- as.matrix(Expression[ , -1]); storage.mode(cts) <- "integer"
+condition <- factor(c("controlF","controlF","experimental","controlP",
+                      "experimental","experimental","controlF",
+                      "controlP","controlP","controlP"),
+                    levels = c("controlF","controlP","experimental"))
+coldata <- data.frame(condition = condition, row.names = colnames(cts))
+```
+
+## 3  DESeqDataSet & pre‑filter
+```{r dds-setup}
+dds <- DESeqDataSetFromMatrix(countData = cts, colData = coldata, design = ~ condition)
+keep <- rowSums(counts(dds) >= 10) >= 3   # ≥10 reads in ≥3 samples
+dds  <- dds[keep, ]
+```
+
+## 4  Run DESeq2
+```{r deseq-run}
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+## 5  Variance‑stabilised QC
+```{r vst-qc, fig.width=6.5, fig.height=5}
+vsd <- vst(dds, blind = FALSE)
+
+# PCA
+pca_plot <- plotPCA(vsd, intgroup = "condition") + ggtitle("PCA – VST counts")
+print(pca_plot)
+
+ggsave(file.path(output_dir, "PCA_vst.pdf"), pca_plot, width = 6, height = 5)
+
+# Size factors
+pdf(file.path(output_dir, "size_factors.pdf"))
+barplot(sizeFactors(dds), las = 2, ylab = "sizeFactor", main = "Size factors")
+dev.off()
+
+# Dispersion trend
+pdf(file.path(output_dir, "dispersion_trend.pdf"))
+plotDispEsts(dds)
+dev.off()
+```
+
+## 6  Additional validation metrics
+```{r qc-extra}
+# 6.1  Sample‑distance heatmap
+mat <- as.matrix(dist(t(assay(vsd))))
+pdf(file.path(output_dir, "sample_distance_heatmap.pdf"))
+pheatmap(mat, clustering_distance_rows = "euclidean", clustering_distance_cols = "euclidean",
+         main = "Sample–sample distance (VST)")
+dev.off()
+
+# 6.2  Cook's distance boxplot
+pdf(file.path(output_dir, "cooks_distance_boxplot.pdf"))
+boxplot(log10(assays(dds)[["cooks"]]), range = 0, outline = FALSE,
+        las = 2, ylab = "log10 Cook's distance", main = "Influential observations")
+dev.off()
+
+# 6.3  Mean–SD plot of VST counts
+pdf(file.path(output_dir, "meanSD_vst.pdf"))
+vsn::meanSdPlot(assay(vsd))
+dev.off()
+
+# 6.4  P‑value histogram
+res_tmp <- results(dds)
+pdf(file.path(output_dir, "pvalue_histogram.pdf"))
+hist(res_tmp$pvalue, breaks = 50, col = "grey", main = "P-value distribution", xlab = "p-value")
+dev.off()
+
+# 6.5  Replicate correlation pairs plot (quick visual)
+pdf(file.path(output_dir, "replicate_correlation_pairs.pdf"))
+pairs(log10(counts(dds, norm = TRUE) + 1), pch = ".", main = "Normalised count pairs")
+dev.off()
+```
+
+## 7  Experimental vs controlF
+```{r exp-vs-ctrlF}
+res_raw <- results(dds, name = "condition_experimental_vs_controlF")
+res_shr <- lfcShrink(dds, coef = "condition_experimental_vs_controlF", type = "apeglm")
+
+# MA plots (raw & shrunk)
+pdf(file.path(output_dir, "MA_raw.pdf")); plotMA(res_raw, alpha = 0.05); dev.off()
+pdf(file.path(output_dir, "MA_shrunk.pdf")); plotMA(res_shr, alpha = 0.05); dev.off()
+
+res_final <- data.frame(baseMean        = res_raw$baseMean,
+                        log2FC_shrunken = res_shr$log2FoldChange,
+                        lfcSE_shrunken  = res_shr$lfcSE,
+                        pvalue          = res_raw$pvalue,
+                        padj            = res_raw$padj,
+                        row.names       = rownames(res_raw))
+write.csv(res_final, file.path(output_dir, "DESeq2_experimental_vs_controlF.csv"))
+
+# Up/down counts summary
+sig <- res_final$padj < 0.05 & !is.na(res_final$padj)
+up   <- sum(sig & res_final$log2FC_shrunken > 0)
+down <- sum(sig & res_final$log2FC_shrunken < 0)
+write.table(data.frame(up = up, down = down),
+            file = file.path(output_dir, "sig_gene_counts_experimental_vs_controlF.txt"),
+            sep = "\t", row.names = FALSE)
+```
+
+## 8  Experimental vs controlP
+```{r exp-vs-ctrlP}
+dds_P <- dds; dds_P$condition <- relevel(dds_P$condition, ref = "controlP"); dds_P <- DESeq(dds_P)
+res_P_shr <- lfcShrink(dds_P, coef = "condition_experimental_vs_controlP", type = "apeglm")
+core_cols_P <- intersect(c("baseMean","log2FoldChange","lfcSE","stat","pvalue","padj","svalue"), colnames(res_P_shr))
+write.csv(as.data.frame(res_P_shr)[ , core_cols_P], file.path(output_dir, "DESeq2_experimental_vs_controlP.csv"))
+```
+
+## 9  ControlF vs controlP
+```{r ctrlP-vs-ctrlF}
+# make a new DDS where "controlP" is the reference
+dds_CF <- dds
+dds_CF$condition <- relevel(dds_CF$condition, ref = "controlP")
+dds_CF <- DESeq(dds_CF)
+
+# now resultsNames(dds_CF) will include "condition_controlF_vs_controlP"
+resultsNames(dds_CF)
+# [1] "condition_controlP_vs_experimental"
+# [2] "condition_controlF_vs_controlP"
+# [3] "condition_experimental_vs_controlP"
+
+# use the coef name directly with lfcShrink(type="apeglm")
+res_CF_raw <- results(dds_CF, name = "condition_controlF_vs_controlP")
+res_CF_shr <- lfcShrink(dds_CF,
+                        coef = "condition_controlF_vs_controlP",
+                        type = "apeglm")
+
+# assemble & write out as before
+res_CF <- data.frame(baseMean        = res_CF_raw$baseMean,
+                     log2FC_shrunken = res_CF_shr$log2FoldChange,
+                     lfcSE_shrunken  = res_CF_shr$lfcSE,
+                     pvalue          = res_CF_raw$pvalue,
+                     padj            = res_CF_raw$padj,
+                     row.names       = rownames(res_CF_raw))
+write.csv(res_CF, file.path(output_dir, "DESeq2_controlF_vs_controlP.csv"))
+
+```
+
+## 10  Export normalised counts
+```{r export-counts}
+write.csv(counts(dds, normalized = TRUE), file.path(output_dir, "normalised_counts.csv"))
+```
+
+---
+###  GSEA blocks (commented; edit & set `eval=TRUE` to run)
+```{r gsea-go, eval = FALSE}
+ranked <- res_shr$log2FoldChange; names(ranked) <- rownames(res_shr)
+ranked <- sort(na.omit(ranked), decreasing = TRUE)
+
+# GSEA (BH adjusted)
+gse_go <- gseGO(geneList     = ranked,
+                keyType      = "ENSEMBL",
+                ont          = "ALL",
+                OrgDb        = org.Gg.eg.db,
+                nPerm        = 10000,
+                minGSSize    = 3,
+                maxGSSize    = 800,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose      = TRUE)
+
+pdf("GO_GSEA_dotplot.pdf")
+print(dotplot(gse_go, showCategory = 10, split = ".sign") +
+        facet_grid(. ~ .sign))
+dev.off()
+#```
+
+## 10  Gene-set enrichment – KEGG
+#```{r gsea-kegg}
+# Convert ENSEMBL → ENTREZ
+ids <- bitr(names(ranked), fromType = "ENSEMBL", toType = "ENTREZID",
+            OrgDb = org.Gg.eg.db)
+ids <- ids[!duplicated(ids$ENTREZID), ]
+
+rk2  <- ranked[ids$ENSEMBL]
+names(rk2) <- ids$ENTREZID
+rk2  <- sort(rk2, decreasing = TRUE)
+
+kk2 <- gseKEGG(geneList     = rk2,
+               organism     = "gga",
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "BH",
+               keyType       = "ncbi-geneid")
+
+pdf("KEGG_GSEA_dotplot.pdf")
+print(dotplot(kk2, showCategory = 10, split = ".sign") +
+        facet_grid(. ~ .sign))
+dev.off()
+#```
+
+## 11  Pathway view examples (optional – KEGG API)     uncomment if wanted (enrichment_analysis script takes over in this pipeline)
+#```{r pathview, eval = FALSE}
+# pathview(gene.data = rk2, pathway.id = "gga04260", species = "gga")
+#```
+```
+
+## 11  Session info
+```{r session-info}
+writeLines(capture.output(sessionInfo()), file.path(output_dir, "sessionInfo.txt"))
+```
+

@@ -1,0 +1,16 @@
+summary_type,item,value
+overall,input_rows,12227
+overall,rows_missing_resolved_gene_id,0
+overall,rows_after_gene_id_filter,12227
+overall,duplicate_rows_before_collapse,89
+overall,rows_removed_by_duplicate_collapse,89
+overall,unique_gene_ids_after_collapse,12138
+gene_id_source,SYMBOL,12001
+gene_id_source,Geneid_clean,137
+gene_id_source,Ensembl_GeneID,0
+gene_id_source,Geneid,0
+expression_filtering,genes_before_expression_filtering,12138
+expression_filtering,genes_after_low_expression_filter,12138
+expression_filtering,genes_removed_by_low_expression_filter,0
+expression_filtering,genes_removed_by_zero_variance_filter,0
+expression_filtering,genes_after_all_filters,12138

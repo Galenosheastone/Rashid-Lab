@@ -1,0 +1,369 @@
+---
+title: "R Notebook"
+output: none
+
+Author: Galen O'Shea-Stone
+Date: 10/6/25
+Title: HOX_dev_focus
+---
+
+```{r}
+# ======================================================================
+# HOX axis analyzer — DE-only core + 12 visualizations (white bg, A at top)
+# Required: DE table with columns gene, padj, and log2FC or log2FoldChange
+# Optional (for some plots): expression matrix, sample metadata, HOX coords
+# ======================================================================
+
+# ---------------------------
+# CONFIG — set these paths
+# ---------------------------
+de_file         <- "DESeq2_Sacral_vs_Tail_by_SYMBOL.csv"     # REQUIRED
+out_dir         <- "hox_axis_outputs"
+
+# OPTIONAL inputs (only used by plots 11, 12, 10)
+expr_file       <- NULL  # e.g., "normalized_counts.csv" (rows=genes; first col 'gene'; rest=samples)
+sample_meta     <- NULL  # e.g., "sample_metadata.csv" with columns: sample, group
+meta_group_col  <- "group"  # which column in sample_meta defines groups/stages/regions
+hox_coords_file <- NULL  # e.g., "hox_coords.csv" with columns: gene, start (genomic start position)
+
+padj_cut <- 0.05
+
+# ---------------------------
+# Libraries
+# ---------------------------
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr); library(stringr)
+  library(ggplot2); library(scales)
+})
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---------------------------
+# Helpers
+# ---------------------------
+guess_reader <- function(path){
+  first <- readr::read_lines(path, n_max = 1)
+  if (grepl(",", first)) return(readr::read_csv(path, show_col_types = FALSE))
+  if (grepl("\t", first)) return(readr::read_tsv(path, show_col_types = FALSE))
+  readr::read_table(path, show_col_types = FALSE)
+}
+rename_if <- function(df, from, to){ i <- which(tolower(names(df))==tolower(from)); if(length(i)==1) names(df)[i] <- to; df }
+hox_parse <- function(sym){
+  m <- stringr::str_match(sym, "^HOX([ABCD])(\\d{1,2})$")
+  if (is.na(m[1,1])) return(c(NA, NA))
+  c(m[1,2], as.integer(m[1,3]))
+}
+save_plot <- function(p, stem, w=10, h=3){
+  png_path <- file.path(out_dir, paste0(stem, ".png"))
+  pdf_path <- file.path(out_dir, paste0(stem, ".pdf"))
+  ggsave(png_path, p, width=w, height=h, dpi=300)
+  ggsave(pdf_path, p, width=w, height=h, device = cairo_pdf)
+}
+theme_white <- theme_classic(base_size = 12) +
+  theme(panel.grid = element_blank(), axis.ticks = element_blank())
+rev_y <- c("D","C","B","A")  # reverse to show A at the top
+
+# ---------------------------
+# Load DE table (REQUIRED)
+# ---------------------------
+de <- guess_reader(de_file)
+names(de) <- gsub("\\s+","_",names(de))
+if (!"gene" %in% tolower(names(de))) names(de)[1] <- "gene"
+names(de)[tolower(names(de))=="gene"] <- "gene"
+de <- de |>
+  rename_if("log2foldchange","log2FoldChange") |>
+  rename_if("log2fc_shrunken","log2FC_shrunken") |>
+  rename_if("basemean","baseMean")
+stopifnot("padj" %in% names(de))
+if (!("log2FC" %in% names(de)) && !("log2FoldChange" %in% names(de)))
+  stop("DE file must contain 'log2FC' or 'log2FoldChange'.")
+
+val_col    <- if ("log2FoldChange" %in% names(de)) "log2FoldChange" else "log2FC"
+shrink_col <- if ("log2FC_shrunken" %in% names(de)) "log2FC_shrunken" else val_col
+has_baseMean <- "baseMean" %in% names(de)   # FIX: explicit flag
+
+de2 <- de |>
+  mutate(
+    gene = toupper(as.character(gene)),
+    HOX_cluster = sapply(gene, function(g) hox_parse(g)[1]),
+    HOX_PG      = as.integer(sapply(gene, function(g) hox_parse(g)[2])),
+    is_HOX      = !is.na(HOX_cluster),
+    log2FC_raw  = .data[[val_col]],
+    log2FC_shr  = .data[[shrink_col]],
+    # FIX: compute expr_log2 only if baseMean exists; keep baseMean column as-is
+    expr_log2   = if (has_baseMean) log2(pmax(suppressWarnings(as.numeric(baseMean)), 0) + 1) else NA_real_,
+    dir = case_when(.data[[val_col]] > 0 ~ "up",
+                    .data[[val_col]] < 0 ~ "down",
+                    TRUE ~ "flat"),
+    sig = padj < padj_cut
+  ) |>
+  mutate(HOX_cluster = factor(HOX_cluster, levels = c("A","B","C","D")))
+
+# Curated set
+somite_set <- c("MEOX1","MEOX2","TCF15","MYF5","MYOD1","DLL3","TBX6","SNAI1","SNAI2",
+                "DACT2","DVL1","FZD1","FGF8","FGF18","WNT3A","WNT5A","WNT11",
+                "CYP26A1","ALDH1A2","GDF11","HOXA11","HOXD11","HOXC11","HOXA13","HOXD13",
+                "ZIC1","NPAS4","TBX1","SOX6","SLIT3")
+
+# ---------------------------
+# Tables (same as before)  — FIX: use any_of() for optional baseMean
+# ---------------------------
+present_tbl <- de2 |>
+  mutate(call = case_when(sig & dir=="up"   ~ "↑ (padj<0.05)",
+                          sig & dir=="down" ~ "↓ (padj<0.05)",
+                          TRUE              ~ "ns")) |>
+  select(gene, HOX_cluster, HOX_PG, log2FC_raw, log2FC_shr,
+         any_of("baseMean"), expr_log2, padj, call)  # FIX
+write_csv(present_tbl, file.path(out_dir,"gene_calls_with_HOX_annotations.csv"))
+
+somite_tbl <- de2 |> filter(gene %in% somite_set) |> arrange(padj, desc(abs(log2FC_raw)))
+write_csv(somite_tbl, file.path(out_dir,"somitogenesis_focus_GRCg7b.csv"))
+
+# ======================================================================
+# PLOT 1 — HOX expression heatmap (sig-only; fill = log2(baseMean+1) if available)
+# ======================================================================
+if (!has_baseMean) {
+  message("PLOT 1 skipped: 'baseMean' not found in DE; expression proxy unavailable.")
+} else {
+  dat <- de2 |> filter(is_HOX, sig)
+  lims_expr <- quantile(dat$expr_log2, c(0.05,0.95), na.rm=TRUE)
+  if (!all(is.finite(lims_expr)) || diff(lims_expr)==0) lims_expr <- range(dat$expr_log2, na.rm=TRUE)
+  p1 <- ggplot(dat, aes(HOX_PG, HOX_cluster, fill = expr_log2)) +
+    geom_tile(color = "white", linewidth = 0.7) +
+    scale_x_continuous(breaks = 1:13) +
+    scale_y_discrete(limits = rev_y, drop = FALSE) +
+    scale_fill_viridis_c(option = "C", limits = lims_expr, oob = squish, na.value = "white") +
+    coord_equal() +
+    labs(title = "HOX — expression proxy log2(baseMean+1), significant only",
+         x = "Paralog group (PG)", y = "Cluster (A at top)", fill = "log2(baseMean+1)") +
+    theme_white
+  save_plot(p1, "P01_HOX_expression_grid_SIGONLY")
+}
+
+# ======================================================================
+# PLOT 2 — HOX log2FC grid (sig-only; diverging)
+# ======================================================================
+dat2 <- de2 |> filter(is_HOX, sig)
+lfs <- dat2$log2FC_raw; if (length(na.omit(lfs)) < 3) lfs <- c(-1, 1)
+L  <- max(1, as.numeric(quantile(abs(lfs), 0.9, na.rm = TRUE)))
+lims_lfc <- c(-L, L)
+p2 <- ggplot(dat2, aes(HOX_PG, HOX_cluster, fill = log2FC_raw)) +
+  geom_tile(color = "white", linewidth = 0.7) +
+  scale_x_continuous(breaks = 1:13) +
+  scale_y_discrete(limits = rev_y, drop = FALSE) +
+  scale_fill_gradient2(low = "#CFE8FF", mid = "#FFFFFF", high = "#FFD6CC",
+                       limits = lims_lfc, midpoint = 0, oob = squish) +
+  coord_equal() +
+  labs(title = "HOX — log2FC (raw), significant only",
+       x = "Paralog group (PG)", y = "Cluster (A at top)", fill = "log2FC") +
+  theme_white
+save_plot(p2, "P02_HOX_log2FC_grid_SIGONLY")
+
+# ======================================================================
+# PLOT 3 — HOX direction grid (sig-only; up/down)
+# ======================================================================
+p3 <- ggplot(dat2, aes(HOX_PG, HOX_cluster, fill = ifelse(log2FC_raw < 0, "down","up"))) +
+  geom_tile(color = "white", linewidth = 0.7) +
+  scale_x_continuous(breaks = 1:13) +
+  scale_y_discrete(limits = rev_y, drop = FALSE) +
+  scale_fill_manual(values = c(down = "#FFD6CC", up = "#CFE8FF")) +
+  coord_equal() +
+  labs(title = "HOX — direction (up/down), significant only",
+       x = "Paralog group (PG)", y = "Cluster (A at top)", fill = "Call") +
+  theme_white
+save_plot(p3, "P03_HOX_direction_SIGONLY")
+
+# ======================================================================
+# PLOT 4 — HOX colinearity strip (log2FC vs PG), per cluster
+# ======================================================================
+p4 <- ggplot(dat2, aes(HOX_PG, log2FC_raw)) +
+  geom_jitter(width=.15, height=0, alpha=.8, size=2) +
+  geom_smooth(method="lm", se=FALSE, linewidth=0.6, color="black") +
+  facet_grid(~HOX_cluster, switch = "x") +
+  theme_white + labs(title="HOX colinearity: PG (1→13) vs log2FC (sig only)",
+                     x="Paralog group (PG)", y="log2FC")
+save_plot(p4, "P04_HOX_colinearity_strip", w=10, h=3.4)
+
+# ======================================================================
+# PLOT 5 — Paralog-group RADAR per cluster (polar bars of mean |log2FC|)
+# ======================================================================
+rad <- dat2 |>
+  group_by(HOX_cluster, HOX_PG) |>
+  summarise(val = mean(abs(log2FC_raw), na.rm=TRUE), .groups="drop")
+p5 <- ggplot(rad, aes(HOX_PG, val, fill = HOX_cluster)) +
+  geom_col(width = 0.9, color="white") +
+  coord_polar() +
+  facet_wrap(~HOX_cluster, nrow=1) +
+  scale_x_continuous(breaks = 1:13) +
+  theme_white + theme(legend.position="none") +
+  labs(title="Paralog-group radar — mean |log2FC| (sig HOX)", x="PG", y="mean |log2FC|")
+save_plot(p5, "P05_HOX_radar_by_cluster", w=10, h=3.2)
+
+# ======================================================================
+# PLOT 6 — Somite/caudal gene lollipops
+# ======================================================================
+som <- de2 |> filter(gene %in% somite_set) |> mutate(lbl = ifelse(sig, gene, NA))
+p6 <- ggplot(som, aes(reorder(gene, log2FC_raw), log2FC_raw, fill = log2FC_raw > 0)) +
+  geom_hline(yintercept=0, color="grey70") +
+  geom_segment(aes(xend=reorder(gene, log2FC_raw), y=0, yend=log2FC_raw), linewidth=0.8, color="grey60") +
+  geom_point(size=3, shape=21, color="white") +
+  coord_flip() + theme_white +
+  scale_fill_manual(values=c("TRUE"="#6aaed6","FALSE"="#f4a582")) +
+  labs(title="Somitogenesis/caudal set — lollipop of log2FC", x="", y="log2FC", fill="Up?")
+save_plot(p6, "P06_somite_lollipop", w=7, h=7)
+
+# ======================================================================
+# PLOT 7 — HOX vs expression proxy scatter
+# ======================================================================
+if (!has_baseMean) {
+  message("PLOT 7 skipped: expression proxy (baseMean) unavailable.")
+} else {
+  p7 <- ggplot(dat2, aes(expr_log2, log2FC_raw, color = factor(HOX_PG))) +
+    geom_hline(yintercept=0, color="grey80") +
+    geom_point(size=2, alpha=0.9) +
+    theme_white + labs(title="HOX — log2(baseMean+1) vs log2FC (sig only)",
+                       x="log2(baseMean+1)", y="log2FC", color="PG")
+  save_plot(p7, "P07_HOX_expr_vs_log2FC", w=6.8, h=4)
+}
+
+# ======================================================================
+# PLOT 8 — Mini-grids per cluster (sig-only log2FC), arranged 2×2
+# ======================================================================
+p8 <- ggplot(dat2, aes(HOX_PG, 1, fill = log2FC_raw)) +
+  geom_tile(color="white", linewidth=0.7) +
+  scale_x_continuous(breaks = 1:13) +
+  scale_y_continuous(breaks = NULL) +
+  facet_wrap(~HOX_cluster, nrow=2) +
+  scale_fill_gradient2(low="#CFE8FF", mid="#FFFFFF", high="#FFD6CC",
+                       midpoint=0, oob = squish) +
+  theme_white + theme(strip.background = element_blank(), strip.text=element_text(size=12)) +
+  labs(title="HOX mini-grids (sig, log2FC) by cluster", x="Paralog group (PG)", y="", fill="log2FC")
+save_plot(p8, "P08_HOX_minigrids", w=8, h=5)
+
+# ======================================================================
+# PLOT 9 — Significance outline on full HOX grid (show ALL HOX; outline sig)
+# ======================================================================
+full_hox <- de2 |> filter(is_HOX)
+p9 <- ggplot(full_hox, aes(HOX_PG, HOX_cluster, fill = log2FC_raw)) +
+  geom_tile(color="white", linewidth=0.6) +
+  geom_tile(data = subset(full_hox, sig), fill = NA, color = "black", linewidth = 0.7) +
+  scale_x_continuous(breaks = 1:13) +
+  scale_y_discrete(limits = rev_y, drop = FALSE) +
+  scale_fill_gradient2(low="#CFE8FF", mid="#FFFFFF", high="#FFD6CC",
+                       midpoint=0, oob = squish) +
+  coord_equal() + theme_white +
+  labs(title="HOX — all tiles colored by log2FC with significant outlines",
+       x="Paralog group (PG)", y="Cluster (A at top)", fill="log2FC")
+save_plot(p9, "P09_HOX_all_with_sig_outlines")
+
+# ======================================================================
+# PLOT 10 — Enrichment barcode (simple GSEA-like) for curated sets
+# ======================================================================
+make_barcode <- function(df, geneset, title){
+  if (!"stat" %in% names(df)) return(NULL)
+  rr <- df |> mutate(rank = rank(-.data$stat, ties.method="average"))  # high stat → left
+  rr$in_set <- rr$gene %in% geneset
+  rr <- rr |> arrange(rank)
+  rr$cum <- cumsum(ifelse(rr$in_set, 1, 0))
+  p <- ggplot(rr, aes(x=rank)) +
+    geom_rug(data = subset(rr, in_set), sides="b", color="black", alpha=0.7) +
+    geom_line(aes(y = cum / sum(in_set)), color="steelblue", linewidth=0.8) +
+    theme_white + labs(title=title, x="Rank by -stat (left = higher stat)", y="Running enrichment")
+  p
+}
+p10 <- make_barcode(de2, somite_set, "Somite/caudal enrichment barcode (ranked by stat)")
+if (is.null(p10)) {
+  message("PLOT 10 skipped: DE table lacks 'stat' column for ranking.")
+} else {
+  save_plot(p10, "P10_enrichment_barcode", w=8, h=3)
+}
+
+# ======================================================================
+# PLOT 11 — HOX ↔ somite correlation matrix (OPTIONAL, needs expr_file)
+# ======================================================================
+if (!is.null(expr_file)) {
+  expr <- tryCatch(guess_reader(expr_file), error=function(e) NULL)
+  if (!is.null(expr)) {
+    names(expr)[1] <- "gene"; expr$gene <- toupper(as.character(expr$gene))
+    mat <- expr |> mutate(across(-gene, ~suppressWarnings(as.numeric(.))))
+    hox_rows   <- mat$gene[grepl("^HOX[ABCD][0-9]{1,2}$", mat$gene)]
+    som_rows   <- intersect(somite_set, mat$gene)
+    if (length(hox_rows)>0 && length(som_rows)>0) {
+      mm <- as.matrix(mat[,-1]); rownames(mm) <- mat$gene
+      mm <- log2(pmax(mm,0) + 1)
+      H  <- t(mm[hox_rows, , drop=FALSE])
+      S  <- t(mm[som_rows, , drop=FALSE])
+      cor_mat <- cor(H, S, use="pairwise.complete.obs", method="spearman")
+      cm <- as.data.frame(as.table(cor_mat))
+      names(cm) <- c("HOX","Somite","rho")
+      cm$HOX_cluster <- factor(sapply(as.character(cm$HOX), function(g) hox_parse(g)[1]), levels=c("A","B","C","D"))
+      cm$HOX_PG      <- as.integer(sapply(as.character(cm$HOX), function(g) hox_parse(g)[2]))
+      p11 <- ggplot(cm, aes(Somite, paste0(HOX_cluster,"-",HOX_PG), fill=rho)) +
+        geom_tile(color="white") +
+        scale_fill_gradient2(low="#b2df8a", mid="white", high="#fb9a99", midpoint=0, limits=c(-1,1)) +
+        theme_white + theme(axis.text.x=element_text(angle=60, hjust=1)) +
+        labs(title="HOX ↔ somite gene correlation (Spearman)", x="Somite genes", y="HOX (Cluster-PG)", fill="rho")
+      save_plot(p11, "P11_HOX_somite_correlation", w=10, h=6)
+    } else message("PLOT 11 skipped: HOX and/or somite genes not found in expression file.")
+  } else message("PLOT 11 skipped: could not read expr_file.")
+} else message("PLOT 11 skipped: expr_file not provided.")
+
+# ======================================================================
+# PLOT 12 — Genomic position vs effect (OPTIONAL, needs hox_coords_file)
+# ======================================================================
+if (!is.null(hox_coords_file)) {
+  coords <- tryCatch(guess_reader(hox_coords_file), error=function(e) NULL)
+  if (!is.null(coords) && all(c("gene","start") %in% tolower(names(coords)))) {
+    names(coords) <- tolower(names(coords))
+    coords$gene <- toupper(as.character(coords$gene))
+    df <- de2 |> filter(is_HOX) |> left_join(coords |> select(gene, start), by="gene")
+    if (!all(is.na(df$start))) {
+      p12 <- ggplot(df, aes(as.numeric(start), log2FC_raw, color = HOX_cluster)) +
+        geom_hline(yintercept=0, color="grey80") +
+        geom_point(size=2, alpha=.9) +
+        theme_white + labs(title="HOX — genomic start vs log2FC", x="Genomic start", y="log2FC", color="Cluster")
+      save_plot(p12, "P12_HOX_genomic_position_vs_log2FC", w=7, h=4)
+    } else message("PLOT 12 skipped: 'start' was all NA after merge.")
+  } else message("PLOT 12 skipped: coords file missing or lacks gene/start columns.")
+} else message("PLOT 12 skipped: hox_coords_file not provided.")
+
+# ======================================================================
+# PLOT 13 — Volcano (somite-focused highlight)
+# ======================================================================
+if (!("padj" %in% names(de2))) {
+  message("PLOT 13 skipped: need padj for volcano.")
+} else {
+  volc <- de2 |>
+    mutate(sigflag = padj < padj_cut,
+           somite_flag = gene %in% somite_set,
+           neglog10padj = -log10(pmax(padj, 1e-300)))
+  p13 <- ggplot(volc, aes(log2FC_raw, neglog10padj)) +
+    geom_point(aes(color = ifelse(somite_flag, "somite", ifelse(sigflag, "sig","ns"))),
+               alpha=0.8, size=1.6) +
+    scale_color_manual(values=c(somite="#3B82F6", sig="#F59E0B", ns="grey75")) +
+    theme_white + labs(title="Volcano — somite/caudal genes highlighted",
+                       x="log2FC", y="-log10(padj)", color="") +
+    guides(color=guide_legend(override.aes=list(size=3, alpha=1)))
+  save_plot(p13, "P13_volcano_somite_focus", w=7.2, h=4.6)
+}
+
+# ======================================================================
+# PLOT 14 — PG distribution violins (by PG across clusters)
+# ======================================================================
+p14 <- ggplot(dat2, aes(factor(HOX_PG), log2FC_raw, fill = HOX_cluster)) +
+  geom_hline(yintercept=0, color="grey85") +
+  geom_violin(trim=FALSE, alpha=.8, color="white") +
+  theme_white + labs(title="HOX — log2FC distribution by PG (sig only)",
+                     x="Paralog group (PG)", y="log2FC", fill="Cluster")
+save_plot(p14, "P14_PG_violin_by_cluster", w=9, h=4.5)
+
+# ---------------------------
+# Console summary
+# ---------------------------
+message("All done. Outputs in: ", normalizePath(out_dir))
+
+
+```
+
+
+

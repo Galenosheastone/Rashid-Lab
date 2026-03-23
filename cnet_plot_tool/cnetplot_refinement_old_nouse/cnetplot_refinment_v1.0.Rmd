@@ -1,0 +1,157 @@
+---
+title: "cnet_plot_transcriptomics"
+date created: 6/13/25
+output: html_notebook
+---
+
+# --------------------------------------------------------------------------------
+#  cnetplot_refinement.R – Companion script for Pygo_gene_enrichment workflow
+#  Author : Galen O'Shea‑Stone  |   (June 2025)
+# --------------------------------------------------------------------------------
+#  Purpose :
+#    •  Read enrichment result objects (ego, ekegg, ereact) + fold‑change vector
+#       saved by the main pipeline (see note below).
+#    •  Generate publication‑quality, **refined** 2‑D cnetplots with improved
+#       colouring, layout and interactive HTML twins.
+#    •  Optionally render an **interactive 3‑D** network using the threejs
+#       package (works in any modern browser via WebGL).
+#
+#  Usage   :
+#    Rscript cnetplot_refinement.R  [path/to/enrichment_objects.rds]
+#
+#  Main‑pipeline hook :
+#    Add the following at the very end of your original R Markdown (after
+#    the enrichment objects exist):
+#
+#        saveRDS(list(ego = ego,
+#                     ekegg = ekegg,
+#                     ereact = ereact,
+#                     fc_vec = fc_vec),
+#                "output/enrichment_objects.rds")
+# 
+#   MAKE SURE THAT THE ABOVE FILE IS IN THE WORKING DIRECTORY BEFORE YOU RUN THIS
+# --------------------------------------------------------------------------------
+
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(clusterProfiler)   # cnetplot()
+  library(enrichplot)        # plotting helpers
+  library(igraph)            # network backbone
+  library(ggraph)            # tidygraph visualisation (2‑D)
+  library(ggplot2)           # theming + export
+  library(plotly)            # ggplot‑>HTML widget
+  library(threejs)           # 3‑D WebGL networks
+  library(htmlwidgets)       # saveWidget()
+  library(dplyr); library(tidyr); library(glue)
+})
+
+# ---- 1.  Input & housekeeping --------------------------------------------- #
+args     <- commandArgs(trailingOnly = TRUE)
+rds_file <- if (length(args) >= 1) args[1] else "enrichment_objects.rds"
+if (!file.exists(rds_file))
+  stop("RDS file not found: ", rds_file, call. = FALSE)
+
+objs   <- readRDS(rds_file)
+ego    <- objs$ego
+ekegg  <- objs$ekegg
+ereact <- objs$ereact
+fc_vec <- objs$fc_vec   # named numeric: ENTREZID → log2FC
+
+outdir <- "output"
+dir.create(outdir, showWarnings = FALSE)
+
+# ---- 2.  Helpers ----------------------------------------------------------- #
+refined_cnet <- function(res, fc, showCat = 15, prefix,
+                         layout_alg = "kk", wrap_width = 50,
+                         gene_label_size = 3, cat_label_size = 4) {
+  if (is.null(res) || nrow(as.data.frame(res)) == 0) return(invisible(NULL))
+  message("→ Building refined cnetplot for ", prefix)
+
+  # keep top categories by FDR
+  res2            <- res
+  res2@result     <- res@result %>% arrange(p.adjust) %>% slice_head(n = showCat)
+
+  p <- cnetplot(res2,
+                showCategory = showCat,
+                foldChange   = fc,
+                layout       = layout_alg,   # Kamada‑Kawai – less overlap
+                circular     = FALSE,
+                node_label   = "all",
+                cex_label_category = cat_label_size,
+                cex_label_gene     = gene_label_size) +
+       scale_color_gradient2(low = "royalblue", mid = "grey90",
+                             high = "firebrick", name = "log₂FC") +
+       labs(title    = glue("{prefix}: refined cnetplot"),
+            subtitle = glue("Top {showCat} categories"))
+
+  ggsave(file.path(outdir, glue("cnetplot_refined_{prefix}.pdf")),
+         plot = p, width = 10, height = 8)
+
+  # Interactive HTML twin ----------------------------------------------------
+  html_int <- plotly::ggplotly(p, tooltip = "text")
+  saveWidget(html_int,
+             file.path(outdir, glue("cnetplot_refined_{prefix}.html")),
+             selfcontained = TRUE)
+  invisible(p)
+}
+
+make_cnet_3d <- function(res, fc, showCat = 12, prefix) {
+  if (is.null(res) || nrow(as.data.frame(res)) == 0) return(invisible(NULL))
+  message("→ Building 3‑D cnetplot for ", prefix)
+  df <- as.data.frame(res) %>% arrange(p.adjust) %>% slice_head(n = showCat)
+
+  # Edge list: category ↔ gene ------------------------------------------------
+  edges <- df %>%
+    select(ID, geneID) %>%
+    separate_rows(geneID, sep = "/") %>%
+    rename(from = ID, to = geneID)
+
+  # Node table ---------------------------------------------------------------
+  genes <- unique(edges$to)
+  cats  <- unique(edges$from)
+  nodes <- data.frame(name  = c(cats, genes),
+                      type  = c(rep("Category", length(cats)),
+                                rep("Gene", length(genes))),
+                      stringsAsFactors = FALSE)
+  nodes$color <- ifelse(nodes$type == "Category", "#E74C3C", "#3498DB")
+
+  # Gene‑specific logFC shading (optional) -----------------------------------
+  if (!is.null(fc) && length(fc) > 0) {
+    fc_lut <- fc[nodes$name]
+    rng    <- max(abs(fc_lut), na.rm = TRUE)
+    palette_fc <- colorRampPalette(c("royalblue", "white", "firebrick"))(201)
+    grads  <- cut(fc_lut + rng, breaks = 200, labels = FALSE)
+    nodes$color[nodes$type == "Gene" & !is.na(grads)] <- palette_fc[grads]
+  }
+
+  g <- igraph::graph_from_data_frame(edges, directed = FALSE, vertices = nodes)
+  w <- threejs::graphjs(g,
+                        vertex.color = V(g)$color,
+                        vertex.size  = ifelse(V(g)$type == "Category", 1.2, 0.8),
+                        main = glue("{prefix}: 3‑D cnetplot"))
+  saveWidget(w,
+             file.path(outdir, glue("cnetplot_refined_{prefix}_3D.html")),
+             selfcontained = TRUE)
+  invisible(w)
+}
+
+# ---- 3.  Run --------------------------------------------------------------- #
+refined_cnet(ego,    fc_vec, 15, "GO_ORA")
+refined_cnet(ekegg,  fc_vec, 15, "KEGG_ORA")
+refined_cnet(ereact, fc_vec, 15, "Reactome_ORA")
+
+# Comment out any of the following if WebGL is an issue ----------------------
+#none of these work as of 6/17/25
+
+#make_cnet_3d(ego,    fc_vec, 10, "GO_ORA")
+#make_cnet_3d(ekegg,  fc_vec, 10, "KEGG_ORA")
+#make_cnet_3d(ereact, fc_vec, 10, "Reactome_ORA")
+
+message("\n✓ cnetplot refinement complete – see 'output/' for PDFs & HTML widgets\n")
+
+
+```
+ 
+ 

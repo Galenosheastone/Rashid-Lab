@@ -1,0 +1,183 @@
+---
+title: "DESeq2_Clemson_output"
+author: "Galen O'Shea-Stone"
+date: "2025-06-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+
+
+# Read in data
+## FULL SET
+#All.samples.gene.counts.renamed <- read.delim("redo.ensembl.stranded.counts.renamed.txt")
+
+## SUBSET
+All.samples.gene.counts.renamed <- read.delim("redo.ensembl.stranded.counts.renamed.subset.txt")
+
+# Rename rows
+Expression<-All.samples.gene.counts.renamed
+row.names(Expression) = Expression$Geneid
+
+# Verify columns in dataset
+head(Expression)
+
+# Add and load DESeq2 package
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#  BiocManager::install("AnnotationDbi")
+#  BiocManager::install("org.Gg.eg.db")
+  
+
+
+#BiocManager::install("DESeq2")
+library("DESeq2")
+
+## FULL SET 
+# verify all metrics are integers (ideally should be estimated read counts as per the DESeq2 manual)
+#cts<-as.data.frame(Expression[,2:13])
+
+## SUBSET 
+# verify all metrics are integers (ideally should be estimated read counts as per the DESeq2 manual)
+cts<-as.data.frame(Expression[,2:11])
+
+
+for (i in 1:4){
+  cts[,i]<-as.integer(cts[,i])
+}
+
+# match row name of new table to original dataset
+row.names(cts) = Expression$Geneid
+
+## FULL SET 
+# make conditions table that includes treatment types. Here it is venom time (A or B). Could include a number of variables (like sequencing batch or sequence type)
+#condition = c("experimental", "controlF","controlF","experimental","controlP","experimental", "experimental", "controlF", "controlP", "controlF", "controlP", "controlP")
+#type = c("paired-end", "paired-end", "paired-end", "paired-end", "paired-end", "paired-end","paired-end", "paired-end", "paired-end", "paired-end", "paired-end", "paired-end")
+
+## SUBSET
+condition = c("controlF","controlF","experimental","controlP","experimental", "experimental", "controlP", "controlF", "controlP", "controlP")
+type = c("paired-end", "paired-end", "paired-end", "paired-end", "paired-end", "paired-end","paired-end", "paired-end", "paired-end", "paired-end")
+
+coldata <- cbind(condition,type)
+row.names(coldata) = colnames(cts)
+colnames(coldata) = c("condition","type")
+
+# Rownames of conditions need to match column names of cts, so verify this with the statement below
+# R should return the value TRUE if they match
+all(rownames(coldata) == colnames(cts))
+
+##Set up input matrix for DESeq2. This is where the experimental design is specified
+dds <- DESeqDataSetFromMatrix(countData = cts, colData = coldata, design = ~ condition)
+
+
+##Remove genes with all zeros
+dds <- dds[rowSums(assay(dds)) > 0, ]
+dim(dds)
+
+
+## Run analysis
+dds <- DESeq(dds)
+
+## Check comparisons
+resultsNames(dds)
+
+## Seeing it used ControlF as the control, generate a second model using controlP as the control
+dds_P<-dds
+dds_P$condition<-relevel(dds_P$condition, ref="controlP")
+dds_P<-DESeq(dds_P)
+resultsNames(dds_P)
+
+
+## log transform
+rld <- rlogTransformation(dds)
+rld_P<- rlogTransformation(dds_P)
+
+## plot
+pdf("DESeq2.pca.plot.pdf")
+## FULL SET
+#plotPCA(rld, intgroup = "condition", ntop=25206)
+## SUBSET
+plotPCA(rld, intgroup = "condition", ntop=24721)
+
+dev.off()
+
+# ## something else with plots
+ pca_data <- plotPCA(rld, intgroup = "condition", returnData = TRUE, ntop=24721)
+
+# ggplot(pca_data, aes(x = PC1, y = PC2, color = condition, label = name)) +
+#   geom_point() +
+#   geom_text()
+
+## FULL Data
+# pdf("DESeq2.pca.plot.draft.pdf")
+# ggplot(pca_data, aes(x = PC1, y = PC2, color = condition, label = c( "14S1", "16F", "17F", "18S2", "1P", "20S1", "20S3", "2F", "2P", "3F","4P" ,"9P"))) +
+#   geom_point() +
+#   geom_text()
+# dev.off()
+
+
+## SUBSET
+ pdf("DESeq2.pca.plot.names.pdf")
+ ggplot(pca_data, aes(x = PC1, y = PC2, color = condition, label = c( "16F", "17F", "18S2", "1P", "20S1", "20S3", "2P", "3F","4P" ,"9P"))) +
+   geom_point() +
+   geom_text()
+ dev.off()
+
+
+## inspect size
+sizeFactors(dds)
+sizeFactors(dds_P)
+
+resultsNames(dds)
+dds$condition
+
+
+## TEST
+res_test <- results(dds)
+res_test
+
+
+##Create and view table of results. Adjusted p-value will be the things to look at.
+res <- results(dds,tidy = T)
+#View(res)
+res
+write.csv(res, file="DESeq2_experimental_vs_controlF.csv")
+
+## Run to verify comparison being output
+#res_controlP_vs_controlF <- results(dds, name="condition_controlP_vs_controlF")
+## Cleans up for output table
+res_controlP_vs_controlF <- results(dds, name="condition_controlP_vs_controlF", tidy=T)
+
+write.csv(res_controlP_vs_controlF, file="DESeq2_controlP_vs_controlF.csv")
+
+resultsNames(dds_P)
+## Verify comparison
+#res_P<- results(dds_P)
+#res_P
+
+## Clean output for table
+res_P<- results(dds_P,tidy=T)
+write.csv(res_P, file="DESeq2_experimental_vs_controlP.csv")
+
+
+
+# plot MDS
+rld <- rlog(dds)
+plotPCA(rld)
+
+
+
+
+
+
+
+
+
+```
+
+

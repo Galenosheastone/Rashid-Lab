@@ -1,0 +1,47 @@
+---
+title: "Power_curve"
+author: "Galen O'Shea-Stone"
+date: "2025-08-11"
+output: html_document
+---
+
+```{r}
+# install.packages("pwr")
+library(pwr)
+
+effect_sizes <- c(0.5, 0.8, 1.2, 2.0)
+n_vals <- 2:20
+alpha <- 0.05
+
+df <- do.call(rbind, lapply(effect_sizes, function(d){
+  data.frame(
+    n_per_group = n_vals,
+    effect_size_d = d,
+    power = sapply(n_vals, function(n){
+      # pwr.t.test uses total n for two-sample: n = n1 + n2
+      out <- pwr.t.test(d=d, n=2*n, sig.level=alpha, type="two.sample", alternative="two.sided")
+      out$power
+    })
+  )
+}))
+
+print(head(df))
+
+# plot
+plot(NULL, xlim=range(n_vals), ylim=c(0,1), xlab="Sample size per group",
+     ylab="Power (two-sample t-test, α=0.05)",
+     main="Statistical Power vs. Sample Size per Group")
+cols <- 1:length(effect_sizes)
+for (i in seq_along(effect_sizes)) {
+  d <- effect_sizes[i]
+  sub <- df[df$effect_size_d==d, ]
+  lines(sub$n_per_group, sub$power, type="l", lwd=2, col=cols[i])
+}
+abline(h=0.8, lty=2)
+abline(v=3, lty=3)
+legend("bottomright", legend=paste0("d=", effect_sizes),
+       col=cols, lwd=2, bty="n")
+
+
+
+```

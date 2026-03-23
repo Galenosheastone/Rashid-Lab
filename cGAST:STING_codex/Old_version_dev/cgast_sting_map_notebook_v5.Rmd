@@ -1,0 +1,131 @@
+---
+title: "cGAS-STING Pathway Map Notebook (v5)"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1) Set Parameters
+
+Edit these values if needed, then click **Run All** (or **Knit**).
+
+```{r parameters}
+# Input DESeq2 CSV (Ensembl IDs in first column/ensembl_id).
+input_file <- "DESeq2_GRCg7b_Sacral_vs_Free_by_ENS.csv"
+
+# Output directory for map + tables.
+output_dir <- "cgast_sting_out"
+
+# Plot title.
+plot_title <- "Sacral vs Free (cGAS-STING map)"
+```
+
+## 2) Load Script
+
+```{r load-script, echo=FALSE}
+# Find and source the script in the same folder as this notebook.
+script_candidates <- c(
+  "cgast_sting_map.R",
+  file.path(getwd(), "cgast_sting_map.R")
+)
+script_path <- script_candidates[file.exists(script_candidates)][1]
+
+if (is.na(script_path) || !nzchar(script_path)) {
+  stop("Could not find cgast_sting_map.R in the notebook working directory.")
+}
+
+source(script_path)
+```
+
+## 3) Run Pathway Map
+
+```{r run-map, echo=FALSE}
+if (!file.exists(input_file)) {
+  stop("Input file not found: ", input_file)
+}
+
+if (!exists("run_cgast_sting_map")) {
+  stop("run_cgast_sting_map() not found after sourcing cgast_sting_map.R")
+}
+
+results <- run_cgast_sting_map(
+  input = input_file,
+  outdir = output_dir,
+  title = plot_title
+)
+
+results
+```
+
+## 4) Preview Outputs
+
+This uses the current script settings (white background, black arrows, text-fitted boxes, capped arrows, and updated significance legend).
+
+```{r preview-image, echo=FALSE, out.width="100%"}
+knitr::include_graphics(results$png)
+```
+
+```{r preview-tables, echo=FALSE}
+nodes_preview <- readr::read_tsv(results$nodes, show_col_types = FALSE)
+missing_preview <- readr::read_tsv(results$missing, show_col_types = FALSE)
+all_results_preview <- readr::read_csv(results$all_results, show_col_types = FALSE)
+
+head(nodes_preview, 10)
+head(missing_preview, 10)
+head(all_results_preview, 10)
+```
+
+## 5) Export Results CSV (Notebook)
+
+This writes a notebook-generated CSV copy of the full annotated results table.
+
+```{r export-results-csv, echo=FALSE}
+notebook_results_csv <- file.path(output_dir, "cgast_sting_results_from_notebook.csv")
+readr::write_csv(all_results_preview, notebook_results_csv, na = "NA")
+notebook_results_csv
+```
+
+## 6) Output Files
+
+```{r output-paths, echo=FALSE}
+unlist(c(results, list(notebook_results_csv = notebook_results_csv)))
+```
+
+## 7) Session Info
+
+```{r session-info, echo=TRUE}
+session_info_file <- file.path(output_dir, "sessionInfo.txt")
+session_text <- capture.output(sessionInfo())
+writeLines(session_text, session_info_file, useBytes = TRUE)
+cat(paste(session_text, collapse = "\n"))
+cat("\n\nSaved session info to: ", session_info_file, "\n", sep = "")
+```
+
+## 8) Optional: Additional Pathway Maps
+
+Set `eval=TRUE` in the chunk header below if you want apoptosis, necroptosis, and combined death-module maps in addition to cGAS/STING.
+The combined map now includes:
+1. Explicit TNFRSF1A→TRADD signaling edge rendered above nodes so it is visible.
+2. Manual subcellular compartment boxes (Plasma membrane, Cytosol, Nucleus, Mitochondria, ER/Golgi) for clearer spatial context.
+
+```{r extra-pathways, eval=FALSE, echo=TRUE}
+extra <- run_pathway_maps(
+  input = input_file,
+  outdir = output_dir,
+  title = plot_title,
+  pathways = c("apoptosis", "necroptosis"),
+  include_combined = TRUE
+)
+
+extra
+```
+
+```{r preview-extra-pathways, eval=FALSE, echo=FALSE, out.width="100%"}
+knitr::include_graphics(c(
+  extra$apoptosis$png,
+  extra$necroptosis$png,
+  extra$combined_death$png
+))
+```

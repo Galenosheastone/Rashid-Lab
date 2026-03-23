@@ -1,0 +1,651 @@
+---
+title: "ssGSEA Analysis Tool"
+output: n/a
+author: "Galen O'Shea-Stone"
+date: "`r Sys.Date()`"
+---
+
+```{r}
+#!/usr/bin/env Rscript
+
+##############################################################################
+## ssGSEA analysis + visualization (post-RNA-seq)                            ##
+## - Adds PCA biplot with non-overlapping labels via ggrepel                 ##
+##############################################################################
+
+##############################################################################
+## 0. CONFIGURATION                                                          ##
+##############################################################################
+expr_file         <- "Sacral24_4ssGSEA.csv"
+metadata_file     <- "GRCg7b_metadata_4ssGSEA.csv"
+species_name      <- "Gallus gallus"
+
+gmt_file          <- ""
+msig_collection   <- "H"
+msig_subcollection <- ""
+
+minGSSize         <- 10
+maxGSSize         <- 500
+
+ssgsea_alpha      <- 0.25
+ssgsea_normalize  <- TRUE
+
+top_variable_heatmap_n <- 30
+top_boxplot_n          <- 10
+top_dotplot_n          <- 20
+
+run_umap         <- TRUE
+umap_n_neighbors <- 8
+umap_min_dist    <- 0.2
+
+signature_paths <- c(
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+  "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+  "HALLMARK_COMPLEMENT",
+  "HALLMARK_APOPTOSIS"
+)
+
+ranked_paths_to_plot <- c("HALLMARK_INFLAMMATORY_RESPONSE")
+
+drop_hallmark_prefix  <- TRUE
+underscores_to_spaces <- TRUE
+
+biplot_top_loadings   <- 15
+biplot_scale_arrows   <- TRUE
+
+# NEW: biplot label repel settings
+use_ggrepel_for_biplot <- TRUE
+biplot_label_size      <- 3
+biplot_max_overlaps    <- 50   # increase if many labels still drop
+
+specific_boxplot_paths <- c("HALLMARK_INFLAMMATORY_RESPONSE")
+
+outdir           <- "ssgsea_output"
+install_missing  <- FALSE
+set.seed(1234)
+
+##############################################################################
+## 1. PACKAGES                                                               ##
+##############################################################################
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+cran_pkgs <- c("readr","dplyr","tibble","ggplot2","stringr","tidyr","pheatmap")
+bio_pkgs  <- c("GSVA","GSEABase","msigdbr","BiocParallel")
+
+maybe_install <- function(pkgs, bioc = FALSE) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE) && isTRUE(install_missing)) {
+      if (bioc) BiocManager::install(p, ask = FALSE, update = FALSE)
+      else install.packages(p, dependencies = TRUE)
+    }
+  }
+}
+maybe_install(cran_pkgs, bioc = FALSE)
+maybe_install(bio_pkgs, bioc = TRUE)
+
+if (isTRUE(run_umap) && !requireNamespace("uwot", quietly = TRUE) && isTRUE(install_missing)) {
+  install.packages("uwot", dependencies = TRUE)
+}
+
+# NEW: ggrepel for biplot labels
+if (isTRUE(use_ggrepel_for_biplot) && !requireNamespace("ggrepel", quietly = TRUE) && isTRUE(install_missing)) {
+  install.packages("ggrepel", dependencies = TRUE)
+}
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+  library(stringr)
+  library(tidyr)
+  library(pheatmap)
+  library(GSVA)
+  library(GSEABase)
+  library(msigdbr)
+  library(BiocParallel)
+})
+if (isTRUE(use_ggrepel_for_biplot) && requireNamespace("ggrepel", quietly = TRUE)) {
+  suppressPackageStartupMessages(library(ggrepel))
+}
+
+##############################################################################
+## 2. HELPERS                                                                ##
+##############################################################################
+resolve_path <- function(p) {
+  if (is.null(p) || !nzchar(p)) return(p)
+  if (file.exists(p)) return(p)
+  p2 <- file.path("/mnt/data", p)
+  if (file.exists(p2)) return(p2)
+  return(p)
+}
+
+safe_filename <- function(x) {
+  x <- gsub("[^A-Za-z0-9]+", "_", x)
+  x <- gsub("^_+|_+$", "", x)
+  if (!nzchar(x)) x <- "plot"
+  x
+}
+
+pretty_pathway <- function(x, drop_hallmark = TRUE, underscores_to_spaces = TRUE) {
+  y <- as.character(x)
+  if (isTRUE(drop_hallmark)) y <- sub("^HALLMARK[_ ]+", "", y, ignore.case = FALSE)
+  if (isTRUE(underscores_to_spaces)) y <- gsub("_+", " ", y)
+  y
+}
+
+expr_file     <- resolve_path(expr_file)
+metadata_file <- resolve_path(metadata_file)
+gmt_file      <- resolve_path(gmt_file)
+
+read_matrix <- function(path) {
+  if (!file.exists(path)) stop("Expression file not found: ", path)
+  ext <- tolower(tools::file_ext(path))
+  df <- if (ext %in% c("tsv", "txt")) readr::read_tsv(path, show_col_types = FALSE) else readr::read_csv(path, show_col_types = FALSE)
+  if (ncol(df) < 2) stop("Expression file must have at least 2 columns (gene + samples).")
+  gene_ids <- df[[1]]
+  expr <- df[, -1, drop = FALSE]
+  expr_mat <- as.matrix(expr)
+  rownames(expr_mat) <- as.character(gene_ids)
+  suppressWarnings(storage.mode(expr_mat) <- "numeric")
+  if (all(is.na(expr_mat))) stop("Expression matrix could not be parsed as numeric (all NA after coercion).")
+  keep_rows <- rowSums(!is.na(expr_mat)) > 0
+  expr_mat <- expr_mat[keep_rows, , drop = FALSE]
+  if (is.null(colnames(expr_mat)) || any(!nzchar(colnames(expr_mat)))) stop("Expression matrix must have sample names as column headers.")
+  expr_mat
+}
+
+read_metadata <- function(path, sample_col = "sample", group_col = "group") {
+  if (!file.exists(path)) return(NULL)
+  ext <- tolower(tools::file_ext(path))
+  meta <- if (ext %in% c("tsv", "txt")) readr::read_tsv(path, show_col_types = FALSE) else readr::read_csv(path, show_col_types = FALSE)
+  names(meta) <- tolower(names(meta))
+  sample_col <- tolower(sample_col); group_col <- tolower(group_col)
+  if (!all(c(sample_col, group_col) %in% names(meta))) stop("Metadata file must include columns: ", sample_col, ", ", group_col)
+  meta <- meta %>%
+    dplyr::mutate(sample = as.character(.data[[sample_col]]), group = as.character(.data[[group_col]])) %>%
+    dplyr::select(sample, group) %>%
+    dplyr::filter(!is.na(sample), nzchar(sample), !is.na(group), nzchar(group)) %>%
+    dplyr::distinct(sample, .keep_all = TRUE)
+  meta
+}
+
+##############################################################################
+## 3. LOAD DATA                                                              ##
+##############################################################################
+expr_mat <- read_matrix(expr_file)
+
+if (any(duplicated(rownames(expr_mat)))) {
+  expr_tbl <- as.data.frame(expr_mat) %>%
+    tibble::rownames_to_column("gene") %>%
+    dplyr::mutate(row_var = apply(dplyr::select(., -gene), 1, stats::var, na.rm = TRUE)) %>%
+    dplyr::group_by(gene) %>%
+    dplyr::slice_max(order_by = row_var, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(-row_var)
+  expr_mat <- expr_tbl %>% tibble::column_to_rownames("gene") %>% as.matrix()
+}
+
+meta <- read_metadata(metadata_file)
+if (!is.null(meta)) {
+  if (!all(colnames(expr_mat) %in% meta$sample)) stop("Metadata missing samples: ", paste(setdiff(colnames(expr_mat), meta$sample), collapse = ", "))
+  meta <- meta %>% dplyr::slice(match(colnames(expr_mat), sample))
+}
+
+##############################################################################
+## 4. GENE SETS                                                              ##
+##############################################################################
+if (nzchar(gmt_file)) {
+  if (!file.exists(gmt_file)) stop("GMT file not found: ", gmt_file)
+  gmt <- GSEABase::getGmt(gmt_file)
+  gene_sets <- GSEABase::geneIds(gmt)
+} else {
+  msig_species <- msigdbr::msigdbr_species()$species_name
+  if (!species_name %in% msig_species) stop("MSigDB does not support species '", species_name, "'. Provide a GMT file.")
+  subcoll <- if (nzchar(msig_subcollection)) msig_subcollection else NULL
+  msig <- msigdbr::msigdbr(species = species_name, collection = msig_collection, subcollection = subcoll)
+  gene_sets <- msig %>%
+    dplyr::select(gs_name, gene_symbol) %>%
+    dplyr::filter(!is.na(gs_name), nzchar(gs_name), !is.na(gene_symbol), nzchar(gene_symbol)) %>%
+    dplyr::group_by(gs_name) %>%
+    dplyr::summarise(genes = list(unique(gene_symbol)), .groups = "drop")
+  gene_sets <- setNames(gene_sets$genes, gene_sets$gs_name)
+}
+
+gene_sets <- lapply(gene_sets, intersect, rownames(expr_mat))
+sizes <- vapply(gene_sets, length, integer(1))
+gene_sets <- gene_sets[sizes >= minGSSize & sizes <= maxGSSize]
+if (length(gene_sets) == 0) stop("No gene sets left after filtering. Adjust min/max size or use a GMT file.")
+
+# ---- Export gene list for a specific gene set (post-intersection; used in analysis) ----
+target_set <- "HALLMARK_INFLAMMATORY_RESPONSE"
+
+if (!target_set %in% names(gene_sets)) {
+  stop("Gene set not found in gene_sets: ", target_set,
+       "\nAvailable sets containing 'INFLAM': ",
+       paste(grep("INFLAM", names(gene_sets), value = TRUE), collapse = ", "))
+}
+
+genes_used <- sort(unique(gene_sets[[target_set]]))
+
+cat("\n", target_set, " genes used (post-intersection): ", length(genes_used), "\n", sep = "")
+print(head(genes_used, 25))
+
+write.csv(
+  data.frame(gene_symbol = genes_used),
+  file = file.path(outdir, paste0(target_set, "_genes_used.csv")),
+  row.names = FALSE
+)
+
+##############################################################################
+## 5. ssGSEA                                                                 ##
+##############################################################################
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+
+run_ssgsea <- function(expr_mat, gene_sets) {
+  if (exists("ssgseaParam", where = asNamespace("GSVA"), inherits = FALSE)) {
+    param <- GSVA::ssgseaParam(
+      exprData = expr_mat, geneSets = gene_sets,
+      minSize = minGSSize, maxSize = maxGSSize,
+      alpha = ssgsea_alpha, normalize = ssgsea_normalize,
+      checkNA = "auto", use = "everything"
+    )
+    return(GSVA::gsva(param, verbose = FALSE, BPPARAM = BiocParallel::SerialParam(progressbar = FALSE)))
+  }
+  kcdf <- if (max(expr_mat, na.rm = TRUE) > 50) "Poisson" else "Gaussian"
+  GSVA::gsva(expr_mat, gene_sets, method = "ssgsea", kcdf = kcdf, min.sz = minGSSize, max.sz = maxGSSize, verbose = FALSE)
+}
+
+ssgsea_scores <- run_ssgsea(expr_mat, gene_sets)
+write.csv(ssgsea_scores, file.path(outdir, "ssgsea_scores.csv"))
+saveRDS(ssgsea_scores, file.path(outdir, "ssgsea_scores.rds"))
+
+##############################################################################
+## 6. PCA + BIPLOT WITH GGREPEL                                              ##
+##############################################################################
+pca <- prcomp(t(ssgsea_scores), scale. = TRUE)
+
+# PCA scatter
+pca_df <- data.frame(pca$x, sample = rownames(pca$x))
+if (!is.null(meta)) pca_df <- dplyr::left_join(pca_df, meta, by = "sample")
+
+p_pca <- ggplot(pca_df, aes(PC1, PC2)) +
+  geom_point(aes(color = if (!is.null(meta)) group else NULL), size = 3) +
+  theme_bw(base_size = 11) +
+  labs(title = "ssGSEA PCA", color = "Group")
+ggsave(file.path(outdir, "ssgsea_pca.pdf"), p_pca, width = 6, height = 5)
+
+make_pca_biplot <- function(pca_obj, meta = NULL, n_arrows = 15, scale_arrows = TRUE) {
+  scores <- as.data.frame(pca_obj$x[, 1:2, drop = FALSE])
+  scores$sample <- rownames(scores)
+  if (!is.null(meta)) scores <- dplyr::left_join(scores, meta, by = "sample")
+
+  loads <- as.data.frame(pca_obj$rotation[, 1:2, drop = FALSE])
+  loads$pathway <- rownames(loads)
+  loads$pathway_label <- pretty_pathway(loads$pathway,
+                                       drop_hallmark = drop_hallmark_prefix,
+                                       underscores_to_spaces = underscores_to_spaces)
+  loads$mag <- sqrt(loads$PC1^2 + loads$PC2^2)
+  loads <- loads %>% dplyr::arrange(dplyr::desc(mag)) %>% dplyr::slice_head(n = min(n_arrows, nrow(loads)))
+
+  if (isTRUE(scale_arrows)) {
+    sx <- max(abs(scores$PC1), na.rm = TRUE)
+    sy <- max(abs(scores$PC2), na.rm = TRUE)
+    lx <- max(abs(loads$PC1), na.rm = TRUE)
+    ly <- max(abs(loads$PC2), na.rm = TRUE)
+    mult <- 0.5 * min(sx / ifelse(lx == 0, 1, lx), sy / ifelse(ly == 0, 1, ly))
+    loads$PC1s <- loads$PC1 * mult
+    loads$PC2s <- loads$PC2 * mult
+  } else {
+    loads$PC1s <- loads$PC1
+    loads$PC2s <- loads$PC2
+  }
+
+  p <- ggplot() +
+    geom_point(
+      data = scores,
+      aes(x = PC1, y = PC2, color = if (!is.null(meta)) group else NULL),
+      size = 3
+    ) +
+    geom_segment(
+      data = loads,
+      aes(x = 0, y = 0, xend = PC1s, yend = PC2s),
+      arrow = grid::arrow(length = grid::unit(0.18, "cm")),
+      linewidth = 0.5,
+      alpha = 0.8
+    ) +
+    theme_bw(base_size = 11) +
+    labs(title = "PCA biplot (ssGSEA scores)", x = "PC1", y = "PC2", color = "Group")
+
+  # Non-overlapping labels (ggrepel), fallback to geom_text if missing
+  if (isTRUE(use_ggrepel_for_biplot) && requireNamespace("ggrepel", quietly = TRUE)) {
+    p <- p + ggrepel::geom_text_repel(
+      data = loads,
+      aes(x = PC1s, y = PC2s, label = pathway_label),
+      size = biplot_label_size,
+      max.overlaps = biplot_max_overlaps,
+      box.padding = 0.35,
+      point.padding = 0.25,
+      min.segment.length = 0
+    )
+  } else {
+    p <- p + geom_text(
+      data = loads,
+      aes(x = PC1s, y = PC2s, label = pathway_label),
+      size = biplot_label_size,
+      vjust = 1.1,
+      hjust = 0.5
+    )
+  }
+
+  p
+}
+
+p_biplot <- make_pca_biplot(pca, meta = meta, n_arrows = biplot_top_loadings, scale_arrows = biplot_scale_arrows)
+ggsave(file.path(outdir, "ssgsea_pca_biplot.pdf"), p_biplot, width = 8, height = 6)
+
+##############################################################################
+## 7+. REST OF YOUR PIPELINE                                                 ##
+## If you want, I can merge this ggrepel biplot block back into your full    ##
+## most recent “everything included” script you’re running.                  ##
+##############################################################################
+
+message("Biplot with ggrepel saved to: ", file.path(outdir, "ssgsea_pca_biplot.pdf"))
+
+
+##############################################################################
+## 7. HEATMAP (top variable pathways)                                        ##
+##############################################################################
+pathway_var <- apply(ssgsea_scores, 1, var, na.rm = TRUE)
+top_n <- min(top_variable_heatmap_n, length(pathway_var))
+heatmat <- ssgsea_scores[names(sort(pathway_var, decreasing = TRUE))[1:top_n], , drop = FALSE]
+
+rownames(heatmat) <- pretty_pathway(rownames(heatmat),
+                                   drop_hallmark = drop_hallmark_prefix,
+                                   underscores_to_spaces = underscores_to_spaces)
+
+annotation_col <- NULL
+if (!is.null(meta)) {
+  annotation_col <- meta %>%
+    dplyr::select(sample, group) %>%
+    tibble::column_to_rownames("sample")
+}
+
+pdf(file.path(outdir, "ssgsea_heatmap_top_variable.pdf"), width = 8, height = 10)
+pheatmap::pheatmap(
+  heatmat,
+  scale = "row",
+  annotation_col = annotation_col,
+  clustering_distance_cols = "correlation",
+  main = "Top variable ssGSEA pathways"
+)
+dev.off()
+
+##############################################################################
+## 8. BOXPLOTS (top variable pathways)                                       ##
+##############################################################################
+plot_pathway_boxplots <- function(pathways,
+                                 filename = NULL,
+                                 width = 10, height = 6) {
+  if (is.null(meta)) {
+    message("Skipping boxplots: metadata (sample/group) is required.")
+    return(invisible(NULL))
+  }
+
+  pathways <- unique(as.character(pathways))
+  pathways_present <- intersect(pathways, rownames(ssgsea_scores))
+  if (length(pathways_present) == 0) {
+    message("No requested pathways found in ssgsea_scores. (Check names exactly.)")
+    return(invisible(NULL))
+  }
+
+  df <- as.data.frame(ssgsea_scores[pathways_present, , drop = FALSE]) %>%
+    tibble::rownames_to_column("pathway") %>%
+    dplyr::mutate(
+      pathway_label = pretty_pathway(pathway,
+                                     drop_hallmark = drop_hallmark_prefix,
+                                     underscores_to_spaces = underscores_to_spaces)
+    ) %>%
+    tidyr::pivot_longer(-c(pathway, pathway_label), names_to = "sample", values_to = "score") %>%
+    dplyr::left_join(meta, by = "sample")
+
+  p <- ggplot(df, aes(x = group, y = score, fill = group)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.15, size = 1.2, alpha = 0.7) +
+    facet_wrap(~ pathway_label, scales = "free_y") +
+    theme_bw(base_size = 10) +
+    theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Selected ssGSEA pathways", x = "Group", y = "ssGSEA score")
+
+  if (!is.null(filename)) {
+    ggsave(file.path(outdir, filename), p, width = width, height = height)
+  }
+  return(p)
+}
+
+# Existing "top variable" boxplots
+if (!is.null(meta)) {
+  top_paths <- names(sort(pathway_var, decreasing = TRUE))[1:min(top_boxplot_n, length(pathway_var))]
+  plot_pathway_boxplots(top_paths,
+                        filename = "ssgsea_boxplots_top_variable.pdf",
+                        width = 10, height = 8)
+}
+
+# NEW: Specific pathways boxplots (user-editable list)
+if (length(specific_boxplot_paths) > 0) {
+  plot_pathway_boxplots(specific_boxplot_paths,
+                        filename = "ssgsea_boxplots_specific_pathways.pdf",
+                        width = 10, height = 6)
+}
+
+##############################################################################
+## 9. SAMPLE–SAMPLE CORRELATION HEATMAP (QC / outliers)                      ##
+##############################################################################
+sample_cor <- cor(ssgsea_scores, use = "pairwise.complete.obs", method = "pearson")
+ann <- NULL
+if (!is.null(meta)) ann <- meta %>% dplyr::select(sample, group) %>% tibble::column_to_rownames("sample")
+
+pdf(file.path(outdir, "ssgsea_sample_correlation_heatmap.pdf"), width = 8, height = 7)
+pheatmap::pheatmap(
+  sample_cor,
+  annotation_col = ann,
+  annotation_row = ann,
+  clustering_distance_cols = "correlation",
+  clustering_distance_rows = "correlation",
+  main = "Sample–sample correlation (ssGSEA scores)"
+)
+dev.off()
+
+##############################################################################
+## 10. PATHWAY–PATHWAY CORRELATION HEATMAP (modules / redundancy)            ##
+##############################################################################
+path_cor <- cor(t(ssgsea_scores), use = "pairwise.complete.obs", method = "pearson")
+
+pdf(file.path(outdir, "ssgsea_pathway_correlation_heatmap.pdf"), width = 10, height = 9)
+pheatmap::pheatmap(
+  path_cor,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  main = "Pathway–pathway correlation (ssGSEA scores)"
+)
+dev.off()
+
+##############################################################################
+## 11. UMAP (optional; often cleaner than PCA)                               ##
+##############################################################################
+if (isTRUE(run_umap)) {
+  if (!requireNamespace("uwot", quietly = TRUE)) {
+    message("Package 'uwot' not installed; skipping UMAP.")
+  } else {
+    um <- uwot::umap(
+      t(ssgsea_scores),
+      n_neighbors = umap_n_neighbors,
+      min_dist    = umap_min_dist,
+      metric      = "euclidean"
+    )
+    um_df <- data.frame(UMAP1 = um[, 1], UMAP2 = um[, 2], sample = colnames(ssgsea_scores))
+    if (!is.null(meta)) um_df <- dplyr::left_join(um_df, meta, by = "sample")
+
+    p_umap <- ggplot(um_df, aes(UMAP1, UMAP2)) +
+      geom_point(aes(color = if (!is.null(meta)) group else NULL), size = 3) +
+      theme_bw(base_size = 11) +
+      labs(title = "UMAP of samples (ssGSEA scores)", color = "Group")
+
+    ggsave(file.path(outdir, "ssgsea_umap.pdf"), p_umap, width = 6, height = 5)
+  }
+}
+
+##############################################################################
+## 12. DIFFERENTIAL ssGSEA (2-group volcano + table)                         ##
+##############################################################################
+if (!is.null(meta) && length(unique(meta$group)) == 2) {
+  grp <- meta$group
+  lev <- unique(grp)
+  g1 <- lev[1]
+  g2 <- lev[2]
+
+  stats_df <- apply(ssgsea_scores, 1, function(x) {
+    x1 <- x[grp == g1]
+    x2 <- x[grp == g2]
+    tt <- try(stats::t.test(x2, x1), silent = TRUE)
+    p <- if (inherits(tt, "try-error")) NA_real_ else tt$p.value
+    diff <- mean(x2, na.rm = TRUE) - mean(x1, na.rm = TRUE)
+    c(diff = diff, p = p)
+  }) %>% t() %>% as.data.frame()
+
+  stats_df$pathway <- rownames(stats_df)
+  stats_df$padj <- p.adjust(stats_df$p, method = "BH")
+  stats_df$neglog10_padj <- -log10(stats_df$padj)
+  stats_df$pathway_label <- pretty_pathway(stats_df$pathway,
+                                          drop_hallmark = drop_hallmark_prefix,
+                                          underscores_to_spaces = underscores_to_spaces)
+
+  p_volc <- ggplot(stats_df, aes(x = diff, y = neglog10_padj)) +
+    geom_point(alpha = 0.7) +
+    theme_bw(base_size = 11) +
+    labs(
+      title = paste0("Differential ssGSEA: ", g2, " vs ", g1),
+      x = "Mean score difference",
+      y = "-log10(FDR)"
+    )
+
+  ggsave(file.path(outdir, "ssgsea_volcano.pdf"), p_volc, width = 7, height = 5)
+
+  stats_df <- stats_df %>% dplyr::arrange(padj)
+  write.csv(stats_df, file.path(outdir, "ssgsea_differential_stats.csv"), row.names = FALSE)
+} else {
+  message("Skipping differential/volcano outputs (requires exactly 2 groups in metadata).")
+}
+
+##############################################################################
+## 13. TOP PATHWAYS BY GROUP DOTPLOT (mean ± SE)                             ##
+##############################################################################
+if (!is.null(meta)) {
+  top_paths <- names(sort(pathway_var, decreasing = TRUE))[1:min(top_dotplot_n, length(pathway_var))]
+
+  summ_df <- as.data.frame(ssgsea_scores[top_paths, , drop = FALSE]) %>%
+    tibble::rownames_to_column("pathway") %>%
+    dplyr::mutate(
+      pathway_label = pretty_pathway(pathway,
+                                     drop_hallmark = drop_hallmark_prefix,
+                                     underscores_to_spaces = underscores_to_spaces)
+    ) %>%
+    tidyr::pivot_longer(-c(pathway, pathway_label), names_to = "sample", values_to = "score") %>%
+    dplyr::left_join(meta, by = "sample") %>%
+    dplyr::group_by(group, pathway_label) %>%
+    dplyr::summarise(
+      mean = mean(score, na.rm = TRUE),
+      se   = sd(score, na.rm = TRUE) / sqrt(sum(!is.na(score))),
+      .groups = "drop"
+    )
+
+  p_dot <- ggplot(summ_df, aes(x = mean, y = reorder(pathway_label, mean), color = group)) +
+    geom_point() +
+    geom_errorbarh(aes(xmin = mean - se, xmax = mean + se), height = 0.2) +
+    facet_wrap(~ group, scales = "free_x") +
+    theme_bw(base_size = 10) +
+    labs(title = "Top pathways by group (mean ± SE)", x = "ssGSEA score", y = NULL)
+
+  ggsave(file.path(outdir, "ssgsea_top_pathways_by_group_dotplot.pdf"), p_dot, width = 10, height = 7)
+}
+
+##############################################################################
+## 14. CURATED SIGNATURE HEATMAP                                             ##
+##############################################################################
+sig_present <- intersect(signature_paths, rownames(ssgsea_scores))
+if (length(sig_present) >= 2) {
+  sig_mat <- ssgsea_scores[sig_present, , drop = FALSE]
+  rownames(sig_mat) <- pretty_pathway(rownames(sig_mat),
+                                      drop_hallmark = drop_hallmark_prefix,
+                                      underscores_to_spaces = underscores_to_spaces)
+
+  ann2 <- NULL
+  if (!is.null(meta)) ann2 <- meta %>% dplyr::select(sample, group) %>% tibble::column_to_rownames("sample")
+
+  pdf(file.path(outdir, "ssgsea_signature_heatmap.pdf"),
+      width = 7, height = 0.35 * length(sig_present) + 3)
+  pheatmap::pheatmap(
+    sig_mat,
+    scale = "row",
+    annotation_col = ann2,
+    main = "Curated signature pathways"
+  )
+  dev.off()
+} else {
+  message("Signature pathways not found (or too few present) in current gene set universe.")
+}
+
+##############################################################################
+## 15. RANKED PATHWAY PLOTS (per pathway; presentation-friendly)             ##
+##############################################################################
+plot_ranked_pathway <- function(path_name) {
+  if (!path_name %in% rownames(ssgsea_scores)) {
+    message("Ranked plot skipped; pathway not found: ", path_name)
+    return(invisible(NULL))
+  }
+
+  df <- data.frame(
+    sample = colnames(ssgsea_scores),
+    score  = as.numeric(ssgsea_scores[path_name, colnames(ssgsea_scores)])
+  )
+  if (!is.null(meta)) df <- dplyr::left_join(df, meta, by = "sample")
+
+  if (!is.null(meta)) {
+    df <- df %>% dplyr::arrange(group, score)
+  } else {
+    df <- df %>% dplyr::arrange(score)
+  }
+  df$rank <- seq_len(nrow(df))
+
+  p <- ggplot(df, aes(rank, score)) +
+    geom_line() +
+    geom_point(aes(color = if (!is.null(meta)) group else NULL), size = 2) +
+    theme_bw(base_size = 11) +
+    labs(
+      title = paste0("Ranked ssGSEA scores: ",
+                     pretty_pathway(path_name,
+                                    drop_hallmark = drop_hallmark_prefix,
+                                    underscores_to_spaces = underscores_to_spaces)),
+      x = "Samples (sorted)",
+      y = "ssGSEA score",
+      color = "Group"
+    )
+
+  fn <- paste0("ssgsea_ranked_", safe_filename(path_name), ".pdf")
+  ggsave(file.path(outdir, fn), p, width = 8, height = 4.5)
+  invisible(NULL)
+}
+
+if (length(ranked_paths_to_plot) > 0) {
+  for (p in ranked_paths_to_plot) plot_ranked_pathway(p)
+}
+
+##############################################################################
+## 16. SESSION INFO                                                          ##
+##############################################################################
+writeLines(capture.output(sessionInfo()), file.path(outdir, "sessionInfo.txt"))
+message("ssGSEA analysis complete. Outputs in: ", normalizePath(outdir))
+
+
+```

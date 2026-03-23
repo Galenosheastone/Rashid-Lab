@@ -1,0 +1,14 @@
+"category","item","original","cleaned","value","detail"
+"summary","blank_Geneid_count",NA,NA,"0",NA
+"summary","ensembl_fallback_used",NA,NA,"FALSE",NA
+"summary","ensembl_fallback_count",NA,NA,"0",NA
+"summary","generated_UNLABELED_count",NA,NA,"0",NA
+"summary","duplicate_Geneid_count_before_make.unique",NA,NA,"0",NA
+"summary","make.unique_adjustment_count",NA,NA,"0",NA
+"annotation","added_placeholder_column",NA,"SYMBOL","NA","Added missing annotation column as an NA placeholder."
+"annotation","added_placeholder_column",NA,"NCBI_GeneID","NA","Added missing annotation column as an NA placeholder."
+"summary","symbol_mapped_from_orgdb_count",NA,NA,"12770","Filled missing SYMBOL values from OrgDb using Ensembl_GeneID."
+"summary","metadata_inferred",NA,NA,"TRUE",NA
+"summary","metadata_source",NA,NA,"missing",NA
+"summary","metadata_reordered_to_match_counts",NA,NA,"FALSE",NA
+"summary","reference_level",NA,NA,"Free",NA

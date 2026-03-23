@@ -1,0 +1,44 @@
+Run timestamp: 2026-03-10 11:55:51
+Working directory: /Users/galen2/Documents/Documents_Folder/Rashid_Lab/Code_MAIN/R_Scripts/ssRNAseq_analysis
+Command line: 
+R version: R version 4.5.1 (2025-06-13)
+
+Input file: /Users/galen2/Documents/Documents_Folder/Rashid_Lab/Code_MAIN/R_Scripts/ssRNAseq_analysis/DESeq2_full_combined_ssRNAseq.csv
+Gene-set file: /Users/galen2/Documents/Documents_Folder/Rashid_Lab/Code_MAIN/R_Scripts/ssRNAseq_analysis/curated_gene_sets_populated.csv
+Output directory: /Users/galen2/Documents/Documents_Folder/Rashid_Lab/Code_MAIN/R_Scripts/ssRNAseq_analysis/pathway_scoring_results_notebook
+Methods: gsva, ssgsea, singscore
+Expression prefix: norm_
+Group pattern: ^norm_([A-Za-z]+)_([0-9]+)$
+Primary gene ID column: SYMBOL
+Gene ID priority used: SYMBOL -> Geneid_clean -> Ensembl_GeneID -> Geneid
+Min set size: 5
+Max set size: 500
+Low-expression threshold: 1.0000
+Low-expression min samples: 2
+Low-expression filter disabled: FALSE
+Statistics test: kruskal
+Pairwise test: none
+P-value adjustment: BH
+Boxplot significance annotations: TRUE
+
+Detected normalized sample columns: 12
+Samples: norm_Sacral_1, norm_Free_1, norm_Free_2, norm_Sacral_2, norm_Pygo_1, norm_Sacral_3, norm_Sacral_4, norm_Free_3, norm_Pygo_2, norm_Free_4, norm_Pygo_3, norm_Pygo_4
+Rows after gene ID collapse: 12138
+Genes after all expression filters: 12138
+Pathways loaded from input file: 10
+Pathways retained for GSVA/ssGSEA: 10
+Pathways retained for singscore: 10
+
+Package versions:
+  - optparse: 1.7.5
+  - readr: 2.2.0
+  - dplyr: 1.2.0
+  - tidyr: 1.3.2
+  - tibble: 3.3.1
+  - stringr: 1.6.0
+  - purrr: 1.2.1
+  - ggplot2: 4.0.2
+  - pheatmap: 1.0.13
+  - GSVA: 2.4.7
+  - GSEABase: 1.72.0
+  - singscore: 1.30.0

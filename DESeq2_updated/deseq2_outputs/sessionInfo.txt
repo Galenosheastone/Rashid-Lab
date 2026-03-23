@@ -1,0 +1,48 @@
+R version 4.5.1 (2025-06-13)
+Platform: aarch64-apple-darwin20
+Running under: macOS Tahoe 26.3.1
+
+Matrix products: default
+BLAS:   /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib 
+LAPACK: /Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.1
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+time zone: America/Denver
+tzcode source: internal
+
+attached base packages:
+[1] stats4    stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] org.Gg.eg.db_3.22.0         BiocParallel_1.44.0         vsn_3.78.0                  pheatmap_1.0.13             ggplot2_4.0.1              
+ [6] pathview_1.50.0             enrichplot_1.30.4           clusterProfiler_4.18.4      AnnotationDbi_1.72.0        ashr_2.2-63                
+[11] apeglm_1.32.0               DESeq2_1.50.2               SummarizedExperiment_1.40.0 Biobase_2.70.0              MatrixGenerics_1.22.0      
+[16] matrixStats_1.5.0           GenomicRanges_1.62.1        Seqinfo_1.0.0               IRanges_2.44.0              S4Vectors_0.48.0           
+[21] BiocGenerics_0.56.0         generics_0.1.4             
+
+loaded via a namespace (and not attached):
+  [1] splines_4.5.1           bitops_1.0-9            ggplotify_0.1.3         tibble_3.3.1            R.oo_1.27.1             polyclip_1.10-7        
+  [7] preprocessCore_1.72.0   graph_1.88.1            XML_3.99-0.20           lifecycle_1.0.5         mixsqp_0.3-54           lattice_0.22-7         
+ [13] MASS_7.3-65             magrittr_2.0.4          limma_3.66.0            rmarkdown_2.30          yaml_2.3.12             otel_0.2.0             
+ [19] ggtangle_0.1.0          cowplot_1.2.0           DBI_1.2.3               RColorBrewer_1.1-3      abind_1.4-8             purrr_1.2.1            
+ [25] R.utils_2.13.0          RCurl_1.98-1.17         yulab.utils_0.2.3       tweenr_2.0.3            rappdirs_0.3.3          gdtools_0.4.4          
+ [31] ggrepel_0.9.6           irlba_2.3.5.1           tidytree_0.4.7          codetools_0.2-20        DelayedArray_0.36.0     DOSE_4.4.0             
+ [37] ggforce_0.5.0           tidyselect_1.2.1        aplot_0.2.9             farver_2.1.2            jsonlite_2.0.0          systemfonts_1.3.1      
+ [43] bbmle_1.0.25.1          tools_4.5.1             ggnewscale_0.5.2        treeio_1.34.0           ragg_1.5.0              Rcpp_1.1.1             
+ [49] glue_1.8.0              SparseArray_1.10.8      xfun_0.55               qvalue_2.42.0           dplyr_1.1.4             withr_3.0.2            
+ [55] numDeriv_2016.8-1.1     BiocManager_1.30.27     fastmap_1.2.0           digest_0.6.39           truncnorm_1.0-9         R6_2.6.1               
+ [61] gridGraphics_0.5-1      textshaping_1.0.4       GO.db_3.22.0            RSQLite_2.4.5           R.methodsS3_1.8.2       tidyr_1.3.2            
+ [67] hexbin_1.28.5           fontLiberation_0.1.0    data.table_1.18.0       httr_1.4.7              htmlwidgets_1.6.4       S4Arrays_1.10.1        
+ [73] scatterpie_0.2.6        pkgconfig_2.0.3         gtable_0.3.6            blob_1.3.0              S7_0.2.1                XVector_0.50.0         
+ [79] htmltools_0.5.9         fontBitstreamVera_0.1.1 fgsea_1.36.2            scales_1.4.0            png_0.1-8               ggfun_0.2.0            
+ [85] knitr_1.51              rstudioapi_0.17.1       reshape2_1.4.5          coda_0.19-4.1           nlme_3.1-168            bdsmatrix_1.3-7        
+ [91] org.Hs.eg.db_3.22.0     cachem_1.1.0            stringr_1.6.0           parallel_4.5.1          pillar_1.11.1           grid_4.5.1             
+ [97] vctrs_0.6.5             tidydr_0.0.6            cluster_2.1.8.1         Rgraphviz_2.54.0        evaluate_1.0.5          KEGGgraph_1.70.0       
+[103] invgamma_1.2            mvtnorm_1.3-3           cli_3.6.5               locfit_1.5-9.12         compiler_4.5.1          rlang_1.1.7            
+[109] crayon_1.5.3            SQUAREM_2021.1          labeling_0.4.3          emdbook_1.3.14          affy_1.88.0             plyr_1.8.9             
+[115] fs_1.6.6                ggiraph_0.9.2           stringi_1.8.7           Biostrings_2.78.0       lazyeval_0.2.2          GOSemSim_2.36.0        
+[121] fontquiver_0.2.1        Matrix_1.7-4            patchwork_1.3.2         bit64_4.6.0-1           KEGGREST_1.50.0         statmod_1.5.1          
+[127] igraph_2.2.1            memoise_2.0.1           affyio_1.80.0           ggtree_4.0.4            fastmatch_1.1-6         bit_4.6.0              
+[133] ape_5.8-1               gson_0.1.0             

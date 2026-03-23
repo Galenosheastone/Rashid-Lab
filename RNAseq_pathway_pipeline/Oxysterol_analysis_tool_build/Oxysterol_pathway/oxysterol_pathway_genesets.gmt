@@ -1,0 +1,25 @@
+# GMT format: <gene_set_name>\t<description>\t<gene1>\t<gene2>\t...
+# NOTE: These use HUMAN gene symbols as placeholders.
+# Run the companion R script (oxysterol_ensembl_lookup.R) to convert
+# to chicken Ensembl IDs from your GRCg7b count matrix before scoring.
+
+# Full pathway (all modules)
+OXYSTEROL_FULL	Oxysterol pathway for bone fusion (all modules)	CH25H	CYP7B1	CYP27A1	CYP46A1	CYP7A1	CYP11A1	SMO	PTCH1	GLI1	GLI2	GLI3	HES1	HEY1	GPR183	HSD3B7	NR1H3	NR1H2	ABCA1	ABCG1	SREBF2	SCAP	HMGCR	INSIG1	INSIG2	LDLR	HMGCS1	SULT2B1	HSD11B1	NPC1	NPC2	OSBP	STARD1	STARD4	RUNX2	SP7	ALPL	BGLAP
+
+# Module-level gene sets for scoring
+OXYSTEROL_BIOSYNTHESIS	Enzymatic oxysterol biosynthesis enzymes	CH25H	CYP7B1	CYP27A1	CYP46A1	CYP7A1	CYP11A1
+
+OXYSTEROL_HEDGEHOG	Oxysterol-activated Hedgehog/osteogenic arm	SMO	PTCH1	GLI1	GLI2	GLI3	HES1	HEY1
+
+OXYSTEROL_CHEMOTAXIS	GPR183/EBI2 immune chemotaxis arm	GPR183	HSD3B7	CH25H	CYP7B1
+
+OXYSTEROL_LXR_EFFLUX	LXR-mediated cholesterol efflux and anti-inflammatory	NR1H3	NR1H2	ABCA1	ABCG1
+
+OXYSTEROL_CHOLESTEROL_HOMEOSTASIS	SREBP2/SCAP cholesterol sensing and biosynthesis	SREBF2	SCAP	HMGCR	INSIG1	INSIG2	LDLR	HMGCS1
+
+OXYSTEROL_TRANSPORT	Oxysterol and cholesterol transport	NPC1	NPC2	OSBP	STARD1	STARD4
+
+OXYSTEROL_DEGRADATION	Oxysterol inactivation/degradation enzymes	SULT2B1	HSD11B1	HSD3B7
+
+# ISG-oxysterol bridge set (genes at the intersection of IFN signaling and oxysterol production)
+OXYSTEROL_ISG_BRIDGE	ISG-regulated oxysterol production (IFN → CH25H → 25-HC axis)	CH25H	CYP7B1	GPR183

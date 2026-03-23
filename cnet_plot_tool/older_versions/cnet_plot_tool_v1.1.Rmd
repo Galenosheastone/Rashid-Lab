@@ -1,0 +1,186 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+#!/usr/bin/env Rscript
+###############################################################################
+##  Legible cnet-plots – full suite (GO / KEGG / Reactome + neural subset)   ##
+##  + optional 3-D interactive GO network                                    ##
+##  Needs:  output/enrichment_objects.rds  (from your main notebook)         ##
+###############################################################################
+
+## ---- 1  •  packages --------------------------------------------------------
+suppressPackageStartupMessages({
+  library(enrichplot)   # cnetplot()
+  library(igraph)
+  library(ggraph)
+  library(ggrepel)
+  library(plotly)
+  library(dplyr)
+  library(htmlwidgets)
+  library(ggplot2)
+  library(openxlsx) 
+})
+
+## ---- 2  •  load enrichment -------------------------------------------------
+obj     <- readRDS("enrichment_objects.rds")
+ego     <- obj$ego
+ekegg   <- obj$ekegg
+ereact  <- obj$ereact
+fc_vec  <- obj$fc_vec              # named logFC
+
+outdir  <- "output/cnetplots"
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+## ---- 3  •  helper: decluttered cnet-plot -----------------------------------
+make_cnet <- function(enrich_obj,
+                      title,                   # give every plot an explicit title
+                      top_terms  = 8,
+                      min_genes  = 3,
+                      gene_cex   = 0.8,
+                      term_cex   = 1.2,
+                      layout_alg = "fr") {
+
+  if (is.null(enrich_obj) || nrow(as.data.frame(enrich_obj)) == 0)
+      return(NULL)
+
+  pass_ids <- as.data.frame(enrich_obj) |>
+              filter(Count >= min_genes) |>
+              slice_head(n = top_terms) |>
+              pull(ID)
+
+  trimmed <- enrich_obj
+  trimmed@result <- trimmed@result[trimmed@result$ID %in% pass_ids, , drop = FALSE]
+
+  p_base <- cnetplot(trimmed,
+                     foldChange         = fc_vec,
+                     showCategory       = length(pass_ids),
+                     circular           = FALSE,
+                     node_label         = "all",
+                     layout             = layout_alg,
+                     cex_label_category = term_cex,
+                     cex_label_gene     = gene_cex)
+
+  ig <- attr(p_base, "igraph");  if (is.null(ig)) ig <- attr(p_base, "graph")
+
+  ## embellish + repel labels
+  p <- p_base +
+       ggtitle(title) +
+       theme(plot.title = element_text(hjust = 0.5, size = 14))
+
+  node_df <- p$data
+  flag <- c("category", "isCategory", "type")[c("category","isCategory","type") %in% names(node_df)][1]
+  if (!is.null(flag)) {
+    cat_nodes <- node_df[node_df[[flag]], , drop = FALSE]
+    if (nrow(cat_nodes) > 0)
+      p <- p + geom_text_repel(data  = cat_nodes,
+                               aes(label = name),
+                               size = term_cex * 3,
+                               box.padding = 0.4,
+                               segment.alpha = 0.3,
+                               seed = 1991)
+  }
+
+  attr(p, "igraph") <- ig    # restore for 3-D step
+  p
+}
+
+## ---- 4  •  derive neural GO subset -----------------------------------------
+neural_kw <- c("neuro", "synap", "axon", "dendrit", "neur", "brain", "nerv",
+               "glia", "myelin", "schwann", "spine", "plasticity", "cerebral",
+               "cerebell", "cortex", "spinal", "ganglia", "astrocyte",
+               "oligodendro", "hippocamp", "amygdala")
+
+pick_neural_ids <- function(df) {
+  if (nrow(df) == 0) return(character(0))
+  df[grepl(paste(neural_kw, collapse = "|"), df$Description, ignore.case = TRUE), "ID", drop = TRUE]
+}
+
+neural_ids <- pick_neural_ids(as.data.frame(ego))
+neural_ego <- NULL
+if (length(neural_ids) >= 2) {          # need ≥2 terms for a useful network
+  neural_ego        <- ego
+  neural_ego@result <- dplyr::filter(ego@result, ID %in% neural_ids)
+}
+
+## ---- 5  •  build plots list -------------------------------------------------
+plots <- list(
+  GO_ORA       = make_cnet(ego,         "GO BP ORA – decluttered"),
+  KEGG_ORA     = make_cnet(ekegg,       "KEGG ORA – decluttered"),
+  Reactome_ORA = make_cnet(ereact,      "Reactome ORA – decluttered"),
+  Neural_GO    = make_cnet(neural_ego,  "Neural GO BP ORA – decluttered")
+)
+
+## ---- 6  •  multi-page PDF --------------------------------------------------
+pdf(file.path(outdir, "cnetplots_decluttered.pdf"), 10, 8)
+for (nm in names(plots))
+  if (!is.null(plots[[nm]])) print(plots[[nm]])
+dev.off()
+message("✓ combined PDF → ", file.path(outdir, "cnetplots_decluttered.pdf"))
+
+## ---- 7  •  per-plot PDF & PNG ---------------------------------------------
+for (nm in names(plots)) {
+  pl <- plots[[nm]];  if (is.null(pl)) next
+  base <- file.path(outdir, paste0(nm, "_cnet_2D"))
+  ggsave(paste0(base, ".pdf"), pl, width = 10, height = 8, units = "in")
+  ggsave(paste0(base, ".png"), pl, width = 10, height = 8, units = "in", dpi = 300)
+}
+message("✓ individual 2-D PDFs/PNGs written")
+
+## ---- 8  •  optional 3-D for GO network ------------------------------------
+if (!is.null(plots$GO_ORA)) {
+
+  get_graph <- function(gplot, enrich_obj) {
+    g <- attr(gplot, "igraph");  if (is.null(g)) g <- attr(gplot, "graph")
+    if (is.null(g)) {
+      message("igraph missing – rebuilding minimal graph")
+      tmp <- cnetplot(enrich_obj, foldChange = fc_vec, showCategory = 8)
+      g   <- attr(tmp, "igraph"); if (is.null(g)) g <- attr(tmp, "graph")
+    }
+    g
+  }
+
+  ig <- get_graph(plots$GO_ORA, ego)
+
+  if (is.null(ig)) {
+    warning("Couldn’t obtain an igraph → skipping 3-D GO network.")
+  } else {
+    set.seed(123)
+    xy <- layout_with_fr(ig); coords <- cbind(xy, z = 0)
+    V(ig)$x <- coords[,1]; V(ig)$y <- coords[,2]; V(ig)$z <- coords[,3]
+
+    ed <- as_data_frame(ig, "edges")
+    edge_coords <- data.frame(
+      x = c(V(ig)$x[ed$from], V(ig)$x[ed$to], NA),
+      y = c(V(ig)$y[ed$from], V(ig)$y[ed$to], NA),
+      z = c(V(ig)$z[ed$from], V(ig)$z[ed$to], NA)
+    )
+
+    p3d <- plot_ly(type = "scatter3d", mode = "lines",
+                   x = edge_coords$x, y = edge_coords$y, z = edge_coords$z,
+                   line = list(width = 1, color = "#AAAAAA"),
+                   hoverinfo = "none") %>%
+           add_markers(x = V(ig)$x, y = V(ig)$y, z = V(ig)$z,
+                        text = V(ig)$name,
+                        hoverinfo = "text",
+                        marker = list(size  = ifelse(V(ig)$category, 8, 4),
+                                      color = ifelse(V(ig)$category,
+                                                     "#e24a33", "#348abd"))) %>%
+           layout(title = "GO ORA cnet-plot (interactive 3-D)",
+                  scene  = list(xaxis = list(title = ""),
+                                yaxis = list(title = ""),
+                                zaxis = list(title = "")))
+
+    html_file <- file.path(outdir, "cnet_GO_ORA_3D.html")
+    saveWidget(p3d, html_file, selfcontained = TRUE)
+    message("✓ interactive 3-D GO network → ", html_file)
+  }
+}
+
+message("✓ all done – see  ‘", outdir, "’  for plots")
+
+
+```

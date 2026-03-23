@@ -1,0 +1,174 @@
+---
+title: "DESeq2_Clemson_output GOS refactor – UPDATED (2025-06-30)"
+author: "Rooksie Noorai (original) → Galen O'Shea-Stone (refactor 6/30)"
+date: "2025-06-30"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(666)
+output_dir <- "deseq2_outputs"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+```
+
+## 1  Load libraries
+```{r libs}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+library(DESeq2)
+library(apeglm)
+library(clusterProfiler)
+library(enrichplot)
+library(AnnotationDbi)
+library(org.Gg.eg.db)
+library(pathview)
+library(ggplot2)
+```
+
+## 2  Read counts & metadata
+```{r read-counts}
+Expression <- read.delim("redo.ensembl.stranded.counts.renamed.subset.txt")
+rownames(Expression) <- Expression$Geneid
+cts <- as.matrix(Expression[ , -1]); storage.mode(cts) <- "integer"
+condition <- factor(c("controlF","controlF","experimental","controlP",
+                      "experimental","experimental","controlP",
+                      "controlF","controlP","controlP"),
+                    levels = c("controlF", "controlP", "experimental"))
+coldata <- data.frame(condition = condition, row.names = colnames(cts))
+```
+
+## 3  DESeqDataSet & pre-filter
+```{r dds-setup}
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData   = coldata,
+                              design    = ~ condition)
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds  <- dds[keep, ]
+```
+
+## 4  Run DESeq2
+```{r deseq-run}
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+## 5  QC plots (VST)
+```{r vst-qc, fig.width = 6.5, fig.height = 5}
+vsd <- vst(dds, blind = FALSE)
+
+pca_plot <- plotPCA(vsd, intgroup = "condition") +
+            ggtitle("PCA – variance-stabilised")
+print(pca_plot)
+
+ggsave(file.path(output_dir, "DESeq2_PCA_plot.pdf"), pca_plot, width = 6, height = 5)
+
+pdf(file.path(output_dir, "size_factors_barplot.pdf"))
+barplot(sizeFactors(dds), main = "Normalisation size factors", las = 2, ylab = "sizeFactor")
+dev.off()
+
+pdf(file.path(output_dir, "dispersion_trend.pdf"))
+plotDispEsts(dds)
+dev.off()
+```
+
+## 6  Experimental vs controlF
+```{r primary-contrast}
+res_raw <- results(dds, name = "condition_experimental_vs_controlF")
+res_shr <- lfcShrink(dds, coef = "condition_experimental_vs_controlF", type = "apeglm")
+res_final <- data.frame(baseMean = res_raw$baseMean,
+                        log2FC_shrunken = res_shr$log2FoldChange,
+                        lfcSE_shrunken = res_shr$lfcSE,
+                        pvalue = res_raw$pvalue,
+                        padj   = res_raw$padj,
+                        row.names = rownames(res_raw))
+write.csv(res_final, file.path(output_dir, "DESeq2_experimental_vs_controlF.csv"))
+```
+
+## 7  Experimental vs controlP
+```{r secondary-contrast}
+dds_P <- dds; dds_P$condition <- relevel(dds_P$condition, ref = "controlP"); dds_P <- DESeq(dds_P)
+res_P_shr <- lfcShrink(dds_P, coef = "condition_experimental_vs_controlP", type = "apeglm")
+core_cols_P <- intersect(c("baseMean","log2FoldChange","lfcSE","stat","pvalue","padj","svalue"), colnames(res_P_shr))
+write.csv(as.data.frame(res_P_shr)[ , core_cols_P], file.path(output_dir, "DESeq2_experimental_vs_controlP.csv"))
+```
+
+## 8  ControlP vs controlF
+```{r controlP-vs-controlF}
+res_CF_raw <- results(dds, name = "condition_controlP_vs_controlF")
+res_CF_shr <- lfcShrink(dds, coef = "condition_controlP_vs_controlF", type = "apeglm")
+res_CF <- data.frame(baseMean = res_CF_raw$baseMean,
+                     log2FC_shrunken = res_CF_shr$log2FoldChange,
+                     lfcSE_shrunken  = res_CF_shr$lfcSE,
+                     pvalue = res_CF_raw$pvalue,
+                     padj   = res_CF_raw$padj,
+                     row.names = rownames(res_CF_raw))
+write.csv(res_CF, file.path(output_dir, "DESeq2_controlP_vs_controlF.csv"))
+```
+
+## 9  Export normalised counts for reviewers
+```{r export-counts}
+write.csv(counts(dds, normalized = TRUE), file.path(output_dir, "normalised_counts.csv"))
+```
+
+---
+###  GSEA blocks (commented; edit & set `eval=TRUE` to run)
+```{r gsea-go, eval = FALSE}
+ranked <- res_shr$log2FoldChange; names(ranked) <- rownames(res_shr)
+ranked <- sort(na.omit(ranked), decreasing = TRUE)
+
+# GSEA (BH adjusted)
+gse_go <- gseGO(geneList     = ranked,
+                keyType      = "ENSEMBL",
+                ont          = "ALL",
+                OrgDb        = org.Gg.eg.db,
+                nPerm        = 10000,
+                minGSSize    = 3,
+                maxGSSize    = 800,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose      = TRUE)
+
+pdf("GO_GSEA_dotplot.pdf")
+print(dotplot(gse_go, showCategory = 10, split = ".sign") +
+        facet_grid(. ~ .sign))
+dev.off()
+#```
+
+## 10  Gene-set enrichment – KEGG
+#```{r gsea-kegg}
+# Convert ENSEMBL → ENTREZ
+ids <- bitr(names(ranked), fromType = "ENSEMBL", toType = "ENTREZID",
+            OrgDb = org.Gg.eg.db)
+ids <- ids[!duplicated(ids$ENTREZID), ]
+
+rk2  <- ranked[ids$ENSEMBL]
+names(rk2) <- ids$ENTREZID
+rk2  <- sort(rk2, decreasing = TRUE)
+
+kk2 <- gseKEGG(geneList     = rk2,
+               organism     = "gga",
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "BH",
+               keyType       = "ncbi-geneid")
+
+pdf("KEGG_GSEA_dotplot.pdf")
+print(dotplot(kk2, showCategory = 10, split = ".sign") +
+        facet_grid(. ~ .sign))
+dev.off()
+#```
+
+## 11  Pathway view examples (optional – KEGG API)     uncomment if wanted (enrichment_analysis script takes over in this pipeline)
+#```{r pathview, eval = FALSE}
+# pathview(gene.data = rk2, pathway.id = "gga04260", species = "gga")
+#```
+```
+
+
+## 12  Session info (for reproducibility)
+```{r session-info}
+writeLines(capture.output(sessionInfo()), "sessionInfo.txt")
+```

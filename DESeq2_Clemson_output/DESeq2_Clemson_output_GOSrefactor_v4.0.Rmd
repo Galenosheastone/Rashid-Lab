@@ -1,0 +1,269 @@
+---
+title: "DESeq2 three-way DE — full QC + per-contrast outputs (updated)"
+author: "Galen O'Shea-Stone"
+date: "`r format(Sys.Date())`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(666)
+
+# ---- Configuration -----------------------------------------------------------
+output_dir    <- "deseq2_outputs"
+counts_file   <- "redo.ensembl.stranded.counts.renamed.txt"  # raw counts (tab-delim)
+metadata_file <- "sample_metadata.csv"                               # must contain column 'condition'
+ref_level     <- "controlF"                                          # default reference level
+filter_mode   <- "strict"   # "legacy" (= ≥1 read anywhere) or "strict" (= ≥10 reads in ≥3 samples)
+use_rlog      <- FALSE      # if TRUE use rlog; else VST
+run_lrt       <- TRUE       # optional likelihood ratio test
+run_gsea      <- TRUE       # run GO/KEGG GSEA per contrast
+shrink_method <- "apeglm"   # "apeglm" (default, highest fidelity) or "ashr" (shrinks contrasts w/o refits)
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+core_pkgs <- c(
+  "DESeq2","apeglm","ashr","AnnotationDbi","org.Gg.eg.db",
+  "clusterProfiler","enrichplot","pathview"
+)
+qc_pkgs   <- c("ggplot2","pheatmap","vsn")
+para_pkgs <- c("BiocParallel")
+
+for (pkg in c(core_pkgs, qc_pkgs, para_pkgs)) {
+  if (!requireNamespace(pkg, quietly = TRUE)) BiocManager::install(pkg, ask = FALSE)
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+# Parallel (portable)
+if (.Platform$OS.type == "windows") {
+  BiocParallel::register(BiocParallel::SnowParam(workers = 4))
+} else {
+  BiocParallel::register(BiocParallel::MulticoreParam(workers = 4))
+}
+
+# counts
+Expression <- read.delim(counts_file, check.names = FALSE)
+stopifnot("Geneid" %in% colnames(Expression))
+rownames(Expression) <- Expression$Geneid
+cts <- as.matrix(Expression[, setdiff(colnames(Expression), "Geneid")])
+storage.mode(cts) <- "integer"
+
+# metadata
+coldata <- read.csv(metadata_file, row.names = 1, check.names = FALSE)
+stopifnot("condition" %in% colnames(coldata))
+stopifnot(identical(colnames(cts), rownames(coldata)))
+
+# ensure expected levels & set reference
+coldata$condition <- factor(coldata$condition)
+if (!ref_level %in% levels(coldata$condition)) {
+  stop(paste("ref_level", ref_level, "is not present in metadata$condition"))
+}
+coldata$condition <- relevel(coldata$condition, ref = ref_level)
+
+# DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData = cts, colData = coldata, design = ~ condition)
+
+# gene filter
+if (tolower(filter_mode) == "legacy") {
+  keep <- rowSums(counts(dds) > 0) > 0
+} else {
+  keep <- rowSums(counts(dds) >= 10) >= 3
+}
+dds <- dds[keep, ]
+
+
+dds <- DESeq(dds, parallel = TRUE)
+coef_names <- resultsNames(dds)
+
+if (run_lrt) {
+  dds_lrt <- DESeq(dds, test = "LRT", reduced = ~1, parallel = TRUE)
+  res_lrt <- results(dds_lrt)
+  write.csv(as.data.frame(res_lrt), file.path(output_dir, "LRT_condition_vs_null.csv"))
+}
+vsd_fun <- if (use_rlog) rlog else vst
+vsd <- vsd_fun(dds, blind = FALSE)
+
+# PCA
+p_pca <- plotPCA(vsd, intgroup = "condition") + ggtitle("PCA — variance-stabilised counts")
+ggsave(file.path(output_dir, "QC_PCA_vst_or_rlog.pdf"), p_pca, width = 6.5, height = 5)
+
+# Size factors
+pdf(file.path(output_dir, "QC_size_factors.pdf"));  barplot(sizeFactors(dds), las=2, ylab="sizeFactor", main="Size factors"); dev.off()
+
+# Dispersion trend
+pdf(file.path(output_dir, "QC_dispersion_trend.pdf")); plotDispEsts(dds); dev.off()
+
+# Sample distance heatmap
+mat <- as.matrix(dist(t(assay(vsd))))
+pdf(file.path(output_dir, "QC_sample_distance_heatmap.pdf"))
+pheatmap(mat, clustering_distance_rows="euclidean", clustering_distance_cols="euclidean",
+         main = "Sample–sample distance (VST/rlog)")
+dev.off()
+
+# Cook's distance (safe log)
+pdf(file.path(output_dir, "QC_cooks_distance_boxplot.pdf"))
+boxplot(log10(assays(dds)[["cooks"]] + 1e-8), range=0, outline=FALSE, las=2,
+        ylab="log10 Cook's distance", main="Influential observations")
+dev.off()
+
+# mean–SD plot
+pdf(file.path(output_dir, "QC_meanSD_vst_or_rlog.pdf")); vsn::meanSdPlot(assay(vsd)); dev.off()
+
+# p-value histogram (use first available coefficient)
+first_coef <- grep("^condition_", coef_names, value = TRUE)[1]
+if (!is.na(first_coef)) {
+  res_tmp <- results(dds, name = first_coef, parallel = TRUE)
+  pdf(file.path(output_dir, "QC_pvalue_histogram.pdf"))
+  hist(res_tmp$pvalue, breaks = 50, col = "grey", main = paste("P-value distribution —", first_coef), xlab = "p-value")
+  dev.off()
+}
+
+# Make a filesystem-safe label
+labelize <- function(a, b) gsub("[^A-Za-z0-9._-]+", "_", paste0(a, "_vs_", b))
+
+# Shrink LFCs for a contrast:
+# - apeglm: uses a named coef; relevels & refits automatically if needed
+# - ashr: can shrink arbitrary contrasts without refit
+shrink_contrast <- function(dds, contrast_vec, shrink_method = "apeglm") {
+  grp1 <- contrast_vec[2]; grp0 <- contrast_vec[3]
+  if (tolower(shrink_method) == "ashr") {
+    return(lfcShrink(dds, contrast = contrast_vec, type = "ashr", parallel = TRUE))
+  } else {
+    # apeglm path: try within current reference
+    cur_ref <- levels(dds$condition)[1]
+    coef_name <- paste0("condition_", grp1, "_vs_", grp0)
+    if (grp0 == cur_ref && coef_name %in% resultsNames(dds)) {
+      return(lfcShrink(dds, coef = coef_name, type = "apeglm", parallel = TRUE))
+    } else {
+      # relevel & refit to expose coef
+      dds2 <- dds
+      dds2$condition <- relevel(dds2$condition, ref = grp0)
+      dds2 <- DESeq(dds2, parallel = TRUE)
+      coef_name2 <- paste0("condition_", grp1, "_vs_", grp0)
+      if (!(coef_name2 %in% resultsNames(dds2))) stop("Desired coefficient not found after releveling.")
+      return(lfcShrink(dds2, coef = coef_name2, type = "apeglm", parallel = TRUE))
+    }
+  }
+}
+
+# Export per-contrast outputs (MA, volcano, CSV with raw+shrunken, sig counts).
+run_contrast <- function(dds, group1, group0, do_gsea = TRUE, shrink_method = "apeglm") {
+  lbl <- labelize(group1, group0)
+  contrast_vec <- c("condition", group1, group0)
+  # Raw results (Wald)
+  res_raw <- results(dds, contrast = contrast_vec, parallel = TRUE)
+  res_df  <- as.data.frame(res_raw)
+
+  # Shrunken LFCs
+  res_shr <- tryCatch(shrink_contrast(dds, contrast_vec, shrink_method = shrink_method),
+                      error = function(e) { message("Shrinkage failed: ", e$message); NULL })
+
+  # Compose export table
+  if (!is.null(res_shr)) {
+    out <- data.frame(
+      baseMean        = res_raw$baseMean,
+      log2FC          = res_raw$log2FoldChange,
+      log2FC_shrunken = res_shr$log2FoldChange,
+      lfcSE_shrunken  = res_shr$lfcSE,
+      stat            = res_raw$stat,
+      pvalue          = res_raw$pvalue,
+      padj            = res_raw$padj,
+      row.names       = rownames(res_raw)
+    )
+  } else {
+    out <- data.frame(
+      baseMean = res_raw$baseMean,
+      log2FC   = res_raw$log2FoldChange,
+      stat     = res_raw$stat,
+      pvalue   = res_raw$pvalue,
+      padj     = res_raw$padj,
+      row.names = rownames(res_raw)
+    )
+  }
+  write.csv(out, file.path(output_dir, paste0("DESeq2_", lbl, ".csv")))
+
+  # Sig counts (FDR < 0.05)
+  sig <- !is.na(res_raw$padj) & res_raw$padj < 0.05
+  n_up   <- sum(sig & res_raw$log2FoldChange > 0, na.rm = TRUE)
+  n_down <- sum(sig & res_raw$log2FoldChange < 0, na.rm = TRUE)
+  write.table(data.frame(up = n_up, down = n_down),
+              file = file.path(output_dir, paste0("sig_gene_counts_", lbl, ".txt")),
+              sep = "\t", row.names = FALSE)
+
+  # MA plot
+  pdf(file.path(output_dir, paste0("MA_", lbl, ".pdf"))); plotMA(res_raw, ylim = c(-5,5)); dev.off()
+
+  # Volcano (safe transforms)
+  vdf <- transform(res_df,
+                   neglog10padj = -log10(pmin(padj, 1)),
+                   log2FC       = log2FoldChange)
+  vdf <- vdf[is.finite(vdf$neglog10padj) & is.finite(vdf$log2FC), ]
+  pdf(file.path(output_dir, paste0("volcano_", lbl, ".pdf")))
+  plot(vdf$log2FC, vdf$neglog10padj, pch = 20,
+       xlab = "log2 fold-change", ylab = "-log10(FDR)",
+       main = paste0("Volcano — ", group1, " vs ", group0))
+  abline(h = -log10(0.05), lty = 2)
+  dev.off()
+
+  # GSEA (rank by Wald statistic, BH-adjusted)
+  if (do_gsea) {
+    ranked <- res_raw$stat; names(ranked) <- rownames(res_raw)
+    ranked <- sort(ranked[!is.na(ranked)], decreasing = TRUE)
+
+    # GO GSEA (ENSEMBL keys assumed in rownames)
+    gse_go <- tryCatch(
+      gseGO(geneList = ranked, keyType = "ENSEMBL", ont = "ALL",
+            OrgDb = org.Gg.eg.db, nPerm = 10000,
+            minGSSize = 3, maxGSSize = 800,
+            pvalueCutoff = 0.05, pAdjustMethod = "BH", verbose = FALSE),
+      error = function(e) { message("gseGO failed: ", e$message); NULL }
+    )
+    if (!is.null(gse_go) && nrow(as.data.frame(gse_go)) > 0) {
+      pdf(file.path(output_dir, paste0("GO_GSEA_dotplot_", lbl, ".pdf")))
+      print(dotplot(gse_go, showCategory = 10, split = ".sign") + facet_grid(. ~ .sign))
+      dev.off()
+    }
+
+    # KEGG GSEA (map ENSEMBL -> ENTREZ)
+    ids <- tryCatch(
+      bitr(names(ranked), fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Gg.eg.db),
+      error = function(e) { message("bitr failed: ", e$message); NULL }
+    )
+    if (!is.null(ids) && nrow(ids) > 0) {
+      ids <- ids[!duplicated(ids$ENTREZID), ]
+      rk2 <- ranked[ids$ENSEMBL]; names(rk2) <- as.character(ids$ENTREZID)
+      rk2 <- sort(rk2[!is.na(rk2)], decreasing = TRUE)
+
+      kk2 <- tryCatch(
+        gseKEGG(geneList = rk2, organism = "gga", keyType = "ncbi-geneid",
+                minGSSize = 3, maxGSSize = 800,
+                pvalueCutoff = 0.05, pAdjustMethod = "BH"),
+        error = function(e) { message("gseKEGG failed: ", e$message); NULL }
+      )
+      if (!is.null(kk2) && nrow(as.data.frame(kk2)) > 0) {
+        pdf(file.path(output_dir, paste0("KEGG_GSEA_dotplot_", lbl, ".pdf")))
+        print(dotplot(kk2, showCategory = 10, split = ".sign") + facet_grid(. ~ .sign))
+        dev.off()
+      }
+    }
+  }
+}
+# You can change the order of these or add more if needed
+all_levels <- levels(dds$condition)
+stopifnot(all(c("experimental","controlF","controlP") %in% all_levels))
+
+run_contrast(dds, "experimental", "controlF", do_gsea = run_gsea, shrink_method = shrink_method)
+run_contrast(dds, "experimental", "controlP", do_gsea = run_gsea, shrink_method = shrink_method)
+run_contrast(dds, "controlF",     "controlP", do_gsea = run_gsea, shrink_method = shrink_method)
+
+write.csv(counts(dds, normalized = TRUE), file.path(output_dir, "normalized_counts.csv"))
+writeLines(capture.output(sessionInfo()), file.path(output_dir, "sessionInfo.txt"))
+
+```
+
+
+

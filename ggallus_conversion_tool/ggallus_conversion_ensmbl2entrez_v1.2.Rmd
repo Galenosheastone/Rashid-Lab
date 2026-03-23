@@ -1,0 +1,187 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+###############################################################################
+##  Gallus gallus ID‑mapping helper for ExpressAnalyst / iDEP / DAVID
+##  (c) 2025 Galen O’Shea‑Stone
+##  Updated 2025‑06‑18 – dual rescue (Ensembl v104 + g:Profiler w/ chunking)
+###############################################################################
+
+## 1  PACKAGES ---------------------------------------------------------------
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+required_pkgs <- c("biomaRt", "dplyr", "readr", "stringr", "tidyr")
+for (pkg in required_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    BiocManager::install(pkg, ask = FALSE)
+}
+
+library(biomaRt)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+
+## 2  USER INPUT -------------------------------------------------------------
+infile  <- "ExpAnalyst_format.csv"        # raw counts
+outfile_counts <- "counts_entrez.csv"
+outfile_map    <- "id_map_table.csv"
+
+## 3  READ & PRE‑CLEAN --------------------------------------------------------
+message("Reading count matrix …")
+counts_raw <- read_csv(infile, show_col_types = FALSE)
+id_col <- colnames(counts_raw)[1]
+
+counts <- counts_raw %>%
+  filter(!str_detect(.data[[id_col]], "^(ERCC|__)")) %>%
+  mutate({{id_col}} := str_remove(.data[[id_col]], "\\.\\d+$"),
+         {{id_col}} := str_replace(.data[[id_col]], "^ENSGALT(\\d{9})$", "ENSGALG\\1"))
+
+## 4  CONNECT TO CURRENT Ensembl --------------------------------------------
+message("Connecting to Ensembl …")
+mart <- tryCatch(
+  useEnsembl("genes", dataset = "ggallus_gene_ensembl", mirror = "useast"),
+  error = function(e) {
+    message("useast mirror unavailable (", e$message, "). Falling back to default server …")
+    useEnsembl("genes", dataset = "ggallus_gene_ensembl")
+  }
+)
+
+## 5  PRIMARY MAPPING ---------------------------------------------------------
+message("Querying mapping for ", nrow(counts), " unique IDs …")
+map_tbl <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "external_gene_name"),
+                 filters    = "ensembl_gene_id",
+                 values     = counts[[id_col]],
+                 mart       = mart) %>%
+  rename(!!id_col := ensembl_gene_id,
+         ENTREZ_ID = entrezgene_id,
+         GENE_SYM  = external_gene_name) %>%
+  mutate(across(everything(), as.character)) %>%
+  distinct()
+
+# ---------------------------------------------------------------------------
+# 5b  RESCUE via Ensembl 104 --------------------------------------------------
+unmapped <- setdiff(counts[[id_col]], map_tbl[[id_col]])
+if (length(unmapped)) {
+  legacy_mart <- useEnsembl("genes", dataset = "ggallus_gene_ensembl", version = 104)
+  legacy_map <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "external_gene_name"),
+                      filters    = "ensembl_gene_id",
+                      values     = unmapped,
+                      mart       = legacy_mart) %>%
+    rename(!!id_col := ensembl_gene_id,
+           ENTREZ_ID = entrezgene_id,
+           GENE_SYM  = external_gene_name) %>%
+    mutate(across(everything(), as.character)) %>%
+    distinct()
+
+  if (nrow(legacy_map)) {
+    map_tbl <- bind_rows(map_tbl, legacy_map) %>% distinct()
+    message("Rescued ", nrow(legacy_map), " IDs from Ensembl v104")
+  }
+}
+
+# ---------------------------------------------------------------------------
+# 5c  RESCUE via g:Profiler (chunked + retries) ------------------------------
+if (!requireNamespace("gprofiler2", quietly = TRUE)) install.packages("gprofiler2")
+library(gprofiler2)
+
+still_unmapped <- setdiff(counts[[id_col]], map_tbl[[id_col]])
+if (length(still_unmapped)) {
+  ## --- helper: safe gconvert with 3‑attempt retry ---------------------------
+  safe_convert <- function(id_vec) {
+    attempt <- 1
+    while (attempt <= 3) {
+      res <- tryCatch({
+        gconvert(query = id_vec, organism = "ggallus",
+                 target = c("ENTREZGENE_ACC", "SYMBOL"),
+                 mthreshold = Inf, filter_na = TRUE)
+      }, error = function(e) e)
+      if (!inherits(res, "error")) return(res)
+      message("g:Profiler attempt ", attempt, " failed (", length(id_vec), " IDs). Retrying …")
+      Sys.sleep(2 ^ attempt)            # exponential back‑off: 2, 4 seconds
+      attempt <- attempt + 1
+    }
+    message("g:Profiler gave up after 3 attempts for chunk of ", length(id_vec), " IDs")
+    NULL
+  }
+
+  ## --- split into ≤1 000‑ID chunks ----------------------------------------
+  chunk_vec <- split(still_unmapped, ceiling(seq_along(still_unmapped) / 1000))
+  gp_hits   <- purrr::map(chunk_vec, safe_convert) |> purrr::compact()
+
+  if (length(gp_hits)) {
+    gp_tbl <- bind_rows(gp_hits) %>%
+      transmute(!!id_col := input,
+                ENTREZ_ID = as.character(target),
+                GENE_SYM  = name)
+    map_tbl <- bind_rows(map_tbl, gp_tbl) %>% distinct()
+    message("g:Profiler rescued ", nrow(gp_tbl), " additional IDs after retries")
+  } else {
+    message("g:Profiler rescue returned 0 usable matches (all chunks failed)")
+  }
+} else {
+  message("No IDs left for g:Profiler rescue")
+}
+
+## 6  MERGE & COLLAPSE -------------------------------------------------------  MERGE & COLLAPSE -------------------------------------------------------
+counts_mapped <- left_join(counts, map_tbl, by = id_col) %>% relocate(ENTREZ_ID, .before = 1)
+
+n_total  <- nrow(counts)
+n_mapped <- sum(!is.na(counts_mapped$ENTREZ_ID))
+message("Mapped ", n_mapped, " / ", n_total, " rows (", round(n_mapped/n_total*100,1), " %).")
+
+counts_ok <- counts_mapped %>% filter(!is.na(ENTREZ_ID)) %>%
+  group_by(ENTREZ_ID) %>% summarise(across(where(is.numeric), sum), .groups = "drop")
+
+## 7  WRITE OUTPUTS ----------------------------------------------------------
+write_csv(counts_ok %>% select(ENTREZ_ID, where(is.numeric)), outfile_counts)
+write_csv(map_tbl, outfile_map)
+
+## 6b  OPTIONAL ANNOTATIONS --------------------------------------------------
+write_csv(counts_mapped %>% relocate(ENTREZ_ID, GENE_SYM, .before = 1), "counts_annotated_rows.csv")
+lookup <- map_tbl %>% filter(!is.na(GENE_SYM) & GENE_SYM != "") %>% distinct(ENTREZ_ID, GENE_SYM) %>% group_by(ENTREZ_ID) %>% slice_head(n = 1)
+write_csv(counts_ok %>% left_join(lookup, by = "ENTREZ_ID") %>% relocate(GENE_SYM, .after = ENTREZ_ID), "counts_entrez_symbol.csv")
+
+## EXTRA – symbols-only table for ExpressAnalyst  ----------------------------
+outfile_symbol <- "counts_symbol.csv"
+
+counts_symbol <- counts_ok %>%                      # after collapse
+  left_join(lookup, by = "ENTREZ_ID") %>%           # lookup from Step 6b
+  filter(!is.na(GENE_SYM) & GENE_SYM != "") %>%
+  select(NAME = GENE_SYM, where(is.numeric))        # rename 1st col
+
+write_csv(counts_symbol, outfile_symbol)
+message("Wrote symbols-only counts → ", outfile_symbol)
+
+
+## 6c  SUMMARY ---------------------------------------------------------------
+lib_sizes <- colSums(counts_ok %>% select(where(is.numeric)))
+num_samples <- length(lib_sizes)
+
+mean_lib   <- if (num_samples) round(mean(lib_sizes), 1) else NA
+median_lib <- if (num_samples) median(lib_sizes)         else NA
+min_lib    <- if (num_samples) min(lib_sizes)            else NA
+max_lib    <- if (num_samples) max(lib_sizes)            else NA
+
+summary_tbl <- tibble(
+  Metric = c("Timestamp", "Rows input", "Rows mapped", "Rows unmapped", "Unique Entrez", "Samples", "Mean lib", "Median lib", "Min lib", "Max lib"),
+  Value  = c(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+             n_total,
+             n_mapped,
+             n_total - n_mapped,
+             nrow(counts_ok),
+             num_samples,
+             mean_lib,
+             median_lib,
+             min_lib,
+             max_lib)
+)
+
+write_tsv(summary_tbl, "id_mapping_summary.tsv")
+print(summary_tbl, n = nrow(summary_tbl))
+message("Pipeline complete; outputs ready.")
+```

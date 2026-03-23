@@ -1,0 +1,167 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# neural_kegg_pathview_all.R
+# Run AFTER your main enrichment pipeline (expects output/enrichment_objects.rds).
+# Generates Pathview diagrams for ALL neural-related KEGG pathways (ORA + GSEA).
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(pathview)
+  library(KEGGREST)
+  library(openxlsx)
+})
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+# -----------------------------------------------------------------------------
+# Load saved objects from the main script
+# -----------------------------------------------------------------------------
+rds_file <- file.path("output", "enrichment_objects.rds")
+if (!file.exists(rds_file)) stop("Missing ", rds_file, " — run the main script first.")
+objs <- readRDS(rds_file)
+
+# Expect: ekegg, gsea_kegg, fc_vec (from main script)
+ekegg_df      <- tryCatch(as.data.frame(objs$ekegg),     error = function(e) tibble::tibble())
+gsea_kegg_df  <- tryCatch(as.data.frame(objs$gsea_kegg), error = function(e) tibble::tibble())
+fc_vec        <- objs$fc_vec
+if (is.null(fc_vec) || is.null(names(fc_vec))) stop("Missing or unnamed fc_vec in RDS.")
+
+# -----------------------------------------------------------------------------
+# Output directories
+# -----------------------------------------------------------------------------
+outdir <- "output"
+pv_dir <- file.path(outdir, "pathview_neural_all")
+dir.create(pv_dir, showWarnings = FALSE, recursive = TRUE)
+
+# -----------------------------------------------------------------------------
+# Neural pattern (matches your main script's extended list)
+# -----------------------------------------------------------------------------
+neural_kw <- unique(c(
+  "neuro","neuron","neura","neural","synap","axon","dendrit","neur","brain","nerv",
+  "glia","myelin","schwann","spine","plasticity","cerebral","cerebell","cortex",
+  "spinal","ganglia","astrocyte","oligodendro","hippocamp","amygdala","neurite",
+  "neuritogen","growth cone","axon elongat","axon outgrowth","axon extension",
+  "dendrite outgrowth","dendrite extension","neuron projection","neuronal projection",
+  "growth-cone cytoskeleton","filopodia","lamellipod","microtubule polymeriz",
+  "actin cytoskelet","neurotransm","neuropept","neuromodul","autonom",
+  "sympathetic","parasympathetic","neuromuscular","neurogenesis","axonogen",
+  "myelination","microglia"
+))
+neural_class_kw <- c("Nervous system","Neurodegenerative","Sensory system")
+neural_pattern <- paste(c(neural_kw, neural_class_kw), collapse = "|")
+
+# -----------------------------------------------------------------------------
+# Determine KEGG organism code (e.g., "gga") from IDs, fallback to "gga"
+# -----------------------------------------------------------------------------
+extract_prefix <- function(id) {
+  m <- regmatches(id, regexpr("^[A-Za-z]{3}", id))
+  if (length(m) == 1 && nchar(m) == 3) m else NA_character_
+}
+prefixes <- c(
+  na.omit(sapply(ekegg_df$ID %||% character(0), extract_prefix)),
+  na.omit(sapply(gsea_kegg_df$ID %||% character(0), extract_prefix))
+)
+kegg_code <- if (length(prefixes)) names(sort(table(prefixes), decreasing = TRUE))[1] else "gga"
+message("Using KEGG organism code: ", kegg_code)
+
+# -----------------------------------------------------------------------------
+# Collect neural pathway IDs from KEGG ORA and KEGG GSEA
+# -----------------------------------------------------------------------------
+# From KEGG ORA: search Description + Class (if present)
+neural_ora <- tibble::tibble(ID = character(0), Description = character(0))
+if (nrow(ekegg_df)) {
+  search_ora <- paste0(ekegg_df$Description %||% "",
+                       " ",
+                       if ("Class" %in% names(ekegg_df)) tidyr::replace_na(ekegg_df$Class, "") else "")
+  ora_rows <- grepl(neural_pattern, search_ora, ignore.case = TRUE)
+  if (any(ora_rows)) neural_ora <- ekegg_df[ora_rows, c("ID","Description"), drop = FALSE]
+}
+
+# From KEGG GSEA: search Description
+neural_gsea <- tibble::tibble(ID = character(0), Description = character(0))
+if (nrow(gsea_kegg_df) && all(c("ID","Description") %in% names(gsea_kegg_df))) {
+  gsea_rows <- grepl(neural_pattern, gsea_kegg_df$Description, ignore.case = TRUE)
+  if (any(gsea_rows)) neural_gsea <- gsea_kegg_df[gsea_rows, c("ID","Description"), drop = FALSE]
+}
+
+# Union with source labels for the guide
+neural_union <- dplyr::bind_rows(
+  dplyr::mutate(neural_ora,  Source = "KEGG ORA"),
+  dplyr::mutate(neural_gsea, Source = "KEGG GSEA")
+) %>%
+  dplyr::group_by(ID) %>%
+  dplyr::summarise(
+    Description = dplyr::first(na.omit(Description)),
+    Source      = paste(unique(na.omit(Source)), collapse = " + "),
+    .groups     = "drop"
+  )
+
+if (nrow(neural_union) == 0) {
+  message("No neural-related KEGG pathways found in ORA/GSEA — nothing to render.")
+  quit(save = "no")
+}
+
+message("Neural KEGG pathways found: ", nrow(neural_union))
+
+# -----------------------------------------------------------------------------
+# Render Pathview for each neural pathway
+# -----------------------------------------------------------------------------
+guide <- list()
+
+for (i in seq_len(nrow(neural_union))) {
+  pid  <- neural_union$ID[i]         # e.g., "gga04724"
+  desc <- neural_union$Description[i]
+  src  <- neural_union$Source[i]
+
+  # Pathview expects numeric pathway ID; strip the organism prefix
+  clean <- sub(paste0("^", kegg_code), "", pid)
+  if (identical(clean, pid)) clean <- sub("^\\D+", "", pid)  # fallback: drop all non-digits at start
+
+  message(sprintf("Pathview (neural): %s  (%s; %s)", pid, desc, src))
+
+  old_wd <- getwd(); setwd(pv_dir)
+  tryCatch({
+    pathview(
+      gene.data   = fc_vec,
+      pathway.id  = clean,
+      species     = kegg_code,
+      out.suffix  = "logFC_neural_all",
+      kegg.native = TRUE
+    )
+    base <- paste0(pid, ".logFC_neural_all")
+    guide[[length(guide) + 1]] <- data.frame(
+      Pathway_ID  = pid,
+      Description = desc,
+      Source      = src,
+      PNG_File    = file.path("pathview_neural_all", paste0(base, ".png")),
+      PDF_File    = file.path("pathview_neural_all", paste0(base, ".pdf")),
+      stringsAsFactors = FALSE
+    )
+  }, error = function(e) {
+    message("  ⚠ Pathview error for ", pid, ": ", e$message)
+  })
+  setwd(old_wd)
+}
+
+# -----------------------------------------------------------------------------
+# Write guide table
+# -----------------------------------------------------------------------------
+if (length(guide)) {
+  guide_df <- dplyr::bind_rows(guide)
+  write.csv(guide_df, file = file.path(outdir, "kegg_pathview_neural_all_guide.csv"), row.names = FALSE)
+  openxlsx::write.xlsx(guide_df,
+                       file = file.path(outdir, "kegg_pathview_neural_all_guide.xlsx"),
+                       overwrite = TRUE)
+  message("✓ Guide written: ",
+          file.path(outdir, "kegg_pathview_neural_all_guide.csv"), " and .xlsx")
+} else {
+  message("No pathview images were generated (errors or zero matches).")
+}
+
+message("✓ Done. Files in: ", pv_dir)
+```

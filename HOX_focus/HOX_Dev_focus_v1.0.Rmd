@@ -1,0 +1,151 @@
+---
+title: "R Notebook"
+output: none
+
+Author: Galen O'Shea-Stone
+Date: 10/6/25
+Title: HOX_dev_focus
+---
+
+```{r}
+# ======================================================================
+# HOX axis quick analyzer — SIG-ONLY, A at top, pastel, PNG+PDF outputs
+# ======================================================================
+
+# ---- CONFIG ----
+in_de_file <- "DESeq2_Sacral_vs_Tail_by_SYMBOL.csv"   # <-- set to your DE results file
+out_dir    <- "hox_axis_outputs"
+padj_cut   <- 0.05
+
+# Pastel diverging palette (very light)
+col_low <- "#E9F3FF"  # very light blue
+col_mid <- "#FFFFFF"  # white
+col_high <- "#FFE9E3" # very light coral
+
+# Clamp effect-size range (keeps colors light)
+L_fixed <- 0.5        # use ±1; bump to 1.5 if you want a tad more contrast
+
+# ---- Libraries ----
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr); library(stringr); library(ggplot2)
+})
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---- Robust read ----
+guess_reader <- function(path){
+  first <- readr::read_lines(path, n_max = 1)
+  if (grepl(",", first)) return(readr::read_csv(path, show_col_types = FALSE))
+  if (grepl("\t", first)) return(readr::read_tsv(path, show_col_types = FALSE))
+  readr::read_table(path, show_col_types = FALSE)
+}
+de <- guess_reader(in_de_file)
+names(de) <- gsub("\\s+","_",names(de))
+if (!"gene" %in% tolower(names(de))) names(de)[1] <- "gene"
+names(de)[tolower(names(de))=="gene"] <- "gene"
+
+# Map common names
+rename_if <- function(df, from, to){ i <- which(tolower(names(df))==tolower(from)); if(length(i)==1) names(df)[i] <- to; df }
+de <- de |>
+  rename_if("log2foldchange","log2FoldChange") |>
+  rename_if("log2fc_shrunken","log2FC_shrunken")
+stopifnot(all(c("gene","padj") %in% names(de)))
+if (!("log2FC" %in% names(de)) && !("log2FoldChange" %in% names(de)))
+  stop("Need a log2FC column (either 'log2FC' or 'log2FoldChange').")
+val_col    <- if ("log2FoldChange" %in% names(de)) "log2FoldChange" else "log2FC"
+shrink_col <- if ("log2FC_shrunken" %in% names(de)) "log2FC_shrunken" else val_col
+
+# ---- HOX annotate ----
+hox_parse <- function(sym){
+  m <- stringr::str_match(sym, "^HOX([ABCD])(\\d{1,2})$")
+  if (is.na(m[1,1])) return(c(NA, NA))
+  c(m[1,2], as.integer(m[1,3]))
+}
+de2 <- de |>
+  mutate(
+    gene = toupper(as.character(gene)),
+    HOX_cluster = sapply(gene, function(g) hox_parse(g)[1]),
+    HOX_PG      = as.integer(sapply(gene, function(g) hox_parse(g)[2])),
+    is_HOX      = !is.na(HOX_cluster),
+    log2FC_raw  = .data[[val_col]],
+    log2FC_shr  = .data[[shrink_col]],
+    dir = case_when(.data[[val_col]] > 0 ~ "up",
+                    .data[[val_col]] < 0 ~ "down",
+                    TRUE ~ "flat"),
+    sig = padj < padj_cut
+  ) |>
+  mutate(HOX_cluster = factor(HOX_cluster, levels = c("A","B","C","D")))
+
+# ---- Tables ----
+present_tbl <- de2 |>
+  mutate(call = case_when(sig & dir=="up"   ~ "↑ (padj<0.05)",
+                          sig & dir=="down" ~ "↓ (padj<0.05)",
+                          TRUE              ~ "ns")) |>
+  select(gene, HOX_cluster, HOX_PG, log2FC_raw, log2FC_shr, padj, call)
+write_csv(present_tbl, file.path(out_dir, "gene_calls_with_HOX_annotations.csv"))
+
+somite_set <- c("MEOX1","MEOX2","TCF15","MYF5","MYOD1","DLL3","TBX6","SNAI1","SNAI2",
+                "DACT2","DVL1","FZD1","FGF8","FGF18","WNT3A","WNT5A","WNT11",
+                "CYP26A1","ALDH1A2","GDF11","HOXA11","HOXD11","HOXC11","HOXA13","HOXD13",
+                "ZIC1","NPAS4","TBX1","SOX6","SLIT3")
+somite_tbl <- de2 |> filter(gene %in% somite_set) |> arrange(padj, desc(abs(log2FC_raw)))
+write_csv(somite_tbl, file.path(out_dir, "somitogenesis_focus_GRCg7b.csv"))
+
+# ---- Plot limits (pastel) ----
+lims <- c(-L_fixed, L_fixed)  # keep it light
+
+# ---- PLOT 1 — HOX DE grid (sig-only), A at TOP (reverse y) ----
+hox_sig <- de2 |> filter(is_HOX, sig)
+
+p_de <- ggplot(hox_sig, aes(HOX_PG, HOX_cluster, fill = log2FC_raw)) +
+  geom_tile(color = "white", linewidth = 0.7) +
+  scale_x_continuous(breaks = 1:13) +
+  # Reverse y so A is visually at the top
+  scale_y_discrete(limits = c("D","C","B","A"), drop = FALSE) +
+  scale_fill_gradient2(low = col_low, mid = col_mid, high = col_high,
+                       midpoint = 0, limits = lims, oob = scales::squish) +
+  coord_equal() +
+  labs(title = "HOX (A–D × PG1–13) — log2FC (raw), significant only",
+       x = "Paralog group (PG)", y = "Cluster (A at top)", fill = "log2FC") +
+  theme_light(base_size = 12) +
+  theme(panel.grid.major = element_line(color="grey92"),
+        panel.grid.minor = element_line(color="grey96"),
+        axis.ticks = element_blank())
+
+# Save PNG + PDF (vector)
+ggsave(file.path(out_dir, "HOX_grid_log2FC_SIGONLY.png"), p_de, width = 10, height = 3, dpi = 300)
+ggsave(file.path(out_dir, "HOX_grid_log2FC_SIGONLY.pdf"), p_de, width = 10, height = 3, device = cairo_pdf)
+
+# ---- PLOT 2 — HOX direction map (sig-only), A at TOP ----
+hox_calls_sig <- de2 |>
+  filter(is_HOX, sig) |>
+  mutate(call_dir = ifelse(log2FC_raw < 0, "down", "up"))
+
+p_dir <- ggplot(hox_calls_sig, aes(HOX_PG, HOX_cluster, fill = call_dir)) +
+  geom_tile(color = "white", linewidth = 0.7) +
+  scale_x_continuous(breaks = 1:13) +
+  scale_y_discrete(limits = c("D","C","B","A"), drop = FALSE) +
+  scale_fill_manual(values = c(down = "#FFD6CC", up = "#CFE8FF")) +
+  coord_equal() +
+  labs(title = "HOX direction — significant only",
+       x = "Paralog group (PG)", y = "Cluster (A at top)", fill = "Call") +
+  theme_light(base_size = 12) +
+  theme(panel.grid.major = element_line(color="grey92"),
+        panel.grid.minor = element_line(color="grey96"),
+        axis.ticks = element_blank())
+
+ggsave(file.path(out_dir, "HOX_presence_direction_SIGONLY.png"), p_dir, width = 10, height = 3, dpi = 300)
+ggsave(file.path(out_dir, "HOX_presence_direction_SIGONLY.pdf"), p_dir, width = 10, height = 3, device = cairo_pdf)
+
+message("Saved to: ", normalizePath(out_dir))
+cat("Files:\n",
+    " - HOX_grid_log2FC_SIGONLY.png / .pdf\n",
+    " - HOX_presence_direction_SIGONLY.png / .pdf\n",
+    " - gene_calls_with_HOX_annotations.csv\n",
+    " - somitogenesis_focus_GRCg7b.csv\n", sep = "")
+
+
+```
+
+
+

@@ -1,0 +1,195 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+###############################################################################
+##  Gallus gallus ID-mapping helper for ExpressAnalyst / iDEP / DAVID
+##  (c) 2025  Galen O’Shea-Stone
+##  Dependencies:  Bioconductor (biomaRt ≥ 2.56.1), dplyr ≥ 1.1
+###############################################################################
+
+## 1.  PACKAGES  --------------------------------------------------------------
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+required_pkgs <- c("biomaRt", "dplyr", "readr", "stringr", "tidyr")
+
+for (pkg in required_pkgs) {
+    if (!requireNamespace(pkg, quietly = TRUE))
+        BiocManager::install(pkg, ask = FALSE)
+}
+
+library(biomaRt)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+
+## 2.  USER INPUT -------------------------------------------------------------
+# Path to the raw count matrix exported from FeatureCounts/HTSeq
+infile  <- "ExpAnalyst_format.csv"        # <- change if needed
+outfile_counts <- "counts_entrez.csv"
+outfile_map    <- "id_map_table.csv"
+
+## 3.  READ & PRE-CLEAN  ------------------------------------------------------
+message("Reading count matrix …")
+counts_raw <- read_csv(infile, show_col_types = FALSE)
+
+# Assume first column holds Ensembl IDs (may include version suffix)
+id_col <- colnames(counts_raw)[1]
+
+# Drop ERCC, no_feature, etc. (safe even if not present)
+bad_patterns <- c("^ERCC", "^__")
+counts <- counts_raw %>%
+    filter(!str_detect(.data[[id_col]], str_c(bad_patterns, collapse = "|")))
+
+# Remove “.1”, “.2” version suffixes
+counts[[id_col]] <- str_remove(counts[[id_col]], "\\.\\d+$")
+
+# Convert transcript IDs (ENSGALT…) → gene IDs (ENSGALG…)
+counts[[id_col]] <- str_replace(counts[[id_col]],
+                                "^ENSGALT(\\d{9})$", "ENSGALG\\1")
+
+## 4.  CONNECT TO Ensembl  ----------------------------------------------------
+message("Connecting to Ensembl biomart …")
+mart <- useEnsembl(biomart = "genes",
+                   dataset = "ggallus_gene_ensembl",
+                   mirror  = "uswest")   # pick the closest mirror; change if blocked
+
+## 5.  GET MAPPING TABLE  -----------------------------------------------------
+message("Querying mapping for ", nrow(counts), " unique IDs …")
+map_tbl <- getBM(
+    attributes = c("ensembl_gene_id",
+                   
+                   "entrezgene_id",
+                   "external_gene_name"),
+    filters    = "ensembl_gene_id",
+    values     = counts[[id_col]],
+    mart       = mart
+) %>%
+    rename(!!id_col := ensembl_gene_id,
+           ENTREZ_ID = entrezgene_id,
+           GENE_SYM  = external_gene_name) %>%
+    distinct()
+
+## 6.  MERGE & TIDY  ----------------------------------------------------------
+counts_mapped <- counts %>%
+    left_join(map_tbl, by = id_col) %>%
+    relocate(ENTREZ_ID, .before = 1)
+
+# Report mapping success
+n_total   <- nrow(counts)
+n_mapped  <- sum(!is.na(counts_mapped$ENTREZ_ID))
+pct_map   <- round(n_mapped / n_total * 100, 1)
+message("Mapped ", n_mapped, " of ", n_total, " rows (", pct_map, " %).")
+
+# Remove rows still lacking Entrez ID
+counts_ok <- counts_mapped %>%
+    filter(!is.na(ENTREZ_ID))
+
+# Collapse duplicate Entrez IDs (sum counts OR take mean – pick one)
+collapse_fun <- dplyr::summarise  # change if you prefer mean()
+counts_ok <- counts_ok %>%
+    group_by(ENTREZ_ID) %>%
+    collapse_fun(across(where(is.numeric), sum)) %>%
+    ungroup()
+
+## 7.  WRITE OUTPUTS  ---------------------------------------------------------
+message("Writing cleaned counts → ", outfile_counts)
+write_csv(counts_ok %>% select(ENTREZ_ID, where(is.numeric)),
+          outfile_counts)
+
+message("Writing mapping table  → ", outfile_map)
+write_csv(map_tbl, outfile_map)
+
+message("All done!  Ready to upload ‘", outfile_counts, "’ to ExpressAnalyst.")
+
+## 6b.  OPTIONAL — map annotations back to original rows  --------------------
+##      + add gene symbols to the collapsed table
+## ---------------------------------------------------------------------------
+# -----(A) full row-level copy, just annotated)---------------------------------
+outfile_counts_annot_rows <- "counts_annotated_rows.csv"
+
+counts_annot_rows <- counts_mapped %>%                      # from Step 6
+    relocate(ENTREZ_ID, GENE_SYM, .before = 1)              # bring new cols forward
+
+write_csv(counts_annot_rows, outfile_counts_annot_rows)
+message("Wrote annotated row-level copy → ", outfile_counts_annot_rows)
+
+# -----(B) add gene symbols to the collapsed counts_ok table)------------------
+outfile_counts_sym <- "counts_entrez_symbol.csv"
+
+# build a simple lookup of one symbol per ENTREZ_ID
+gene_sym_lookup <- map_tbl %>%                    # from Step 5
+    filter(!is.na(GENE_SYM) & GENE_SYM != "") %>% # keep useful entries
+    distinct(ENTREZ_ID, GENE_SYM) %>%             # remove dupes
+    group_by(ENTREZ_ID) %>%
+    slice_head(n = 1) %>%                         # take first symbol if many
+    ungroup()
+
+counts_ok_sym <- counts_ok %>%                    # from Step 6
+    left_join(gene_sym_lookup, by = "ENTREZ_ID") %>%
+    relocate(GENE_SYM, .after = ENTREZ_ID)
+
+write_csv(counts_ok_sym, outfile_counts_sym)
+message("Wrote collapsed counts with symbols → ", outfile_counts_sym)
+
+## 6c.  SUMMARY STATISTICS  ----------------------------------------------------
+##      – mapping success + collapsed genes + library-size overview
+## ----------------------------------------------------------------------------
+outfile_summary <- "id_mapping_summary.tsv"
+
+# ---- core mapping numbers ----------------------------------------------------
+total_rows_input        <- n_total                    # from Step 6
+rows_with_entrez        <- n_mapped
+rows_without_entrez     <- total_rows_input - rows_with_entrez
+unique_entrez_after_collapse <- nrow(counts_ok)       # collapsed table
+duplicates_collapsed    <- rows_with_entrez - unique_entrez_after_collapse
+
+# ---- per-sample library sizes (after collapsing) -----------------------------
+sample_cols <- counts_ok %>% select(where(is.numeric)) %>% colnames()
+lib_sizes   <- colSums(counts_ok[sample_cols])
+
+# ---- assemble summary table --------------------------------------------------
+summary_tbl <- tibble::tibble(
+  Metric = c(
+    "Timestamp",
+    "Rows in input (post-filtering)",
+    "Rows with Entrez mapping",
+    "Rows without Entrez mapping",
+    "Unique Entrez IDs after collapsing",
+    "Duplicates collapsed",
+    "Number of samples (columns)",
+    "Mean library size",
+    "Median library size",
+    "Min library size",
+    "Max library size"
+  ),
+  Value = c(
+    format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    total_rows_input,
+    rows_with_entrez,
+    rows_without_entrez,
+    unique_entrez_after_collapse,
+    duplicates_collapsed,
+    length(sample_cols),
+    round(mean(lib_sizes), 1),
+    median(lib_sizes),
+    min(lib_sizes),
+    max(lib_sizes)
+  )
+)
+
+# ---- write & display ---------------------------------------------------------
+readr::write_tsv(summary_tbl, outfile_summary)
+print(summary_tbl, n = Inf)   # shows everything in console
+
+message("Wrote summary statistics → ", outfile_summary)
+
+
+
+```
+

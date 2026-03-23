@@ -1,0 +1,188 @@
+---
+title: "DESeq2_Clemson_output GOS refactor– UPDATED (2025‑06‑30)"
+author: "Rooksie Noorai (original)--> Galen O'Shea‑Stone (refactor 6/25)"
+date: "2025‑06‑30"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(0666)              # reproducibility for any resampling/IHW
+```
+
+## 1  Load libraries
+```{r libs}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+#BiocManager::install(c(
+ # "DESeq2", "apeglm", "clusterProfiler", "enrichplot",
+  #"org.Gg.eg.db", "AnnotationDbi", "pathview"), ask = FALSE)     #use these as needed
+
+library(DESeq2)
+library(apeglm)              # for LFC shrinkage
+library(clusterProfiler)
+library(enrichplot)
+library(AnnotationDbi)
+library(org.Gg.eg.db)
+library(pathview)
+library(ggplot2)
+```
+
+## 2  Read counts & metadata
+```{r read-counts}
+# FULL set (commented out)
+# Expression <- read.delim("redo.ensembl.stranded.counts.renamed.txt")
+# SUBSET used below ──────────────────────────────────────────────────────────
+Expression <- read.delim("redo.ensembl.stranded.counts.renamed.subset.txt")
+rownames(Expression) <- Expression$Geneid
+
+# keep only raw counts (remove Geneid column)
+cts <- as.matrix(Expression[ , -1])
+storage.mode(cts) <- "integer"
+
+# condition & (constant) library type
+condition <- factor(c("controlF","controlF","experimental","controlP",
+                      "experimental","experimental","controlP",
+                      "controlF","controlP","controlP"),
+                    levels = c("controlF", "controlP", "experimental"))
+coldata   <- data.frame(condition = condition, row.names = colnames(cts))
+```
+
+## 3  Create DESeqDataSet & pre-filter
+```{r dds-setup}
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData   = coldata,
+                              design    = ~ condition)
+
+# keep genes with ≥10 counts in ≥3 samples (DESeq2 guideline)
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds  <- dds[keep, ]
+```
+
+## 4  Run DESeq2
+```{r deseq-run}
+dds <- DESeq(dds)
+resultsNames(dds)            # view available contrasts
+```
+
+## 5  Log-free variance stabilisation (VST) & QC plots
+```{r vst-qc, fig.width = 6.5, fig.height = 5}
+vsd <- vst(dds, blind = FALSE)
+
+# PCA
+p <- plotPCA(vsd, intgroup = "condition") + ggtitle("PCA – variance-stabilised")
+print(p)
+
+ggsave("DESeq2_PCA_plot.pdf", p, width = 6, height = 5)
+
+# size-factor barplot
+barplot(sizeFactors(dds), main = "Normalisation size factors",
+        las = 2, ylab = "sizeFactor")
+
+# mean–dispersion trend
+plotDispEsts(dds)
+```
+
+## 6  Primary contrast: experimental vs controlF
+```{r primary-contrast}
+# Wald statistics (raw, unshrunk)
+res_raw <- results(dds, name = "condition_experimental_vs_controlF")
+
+# Shrink LFC for publication & GSEA ranking
+res_shr <- lfcShrink(dds, coef = "condition_experimental_vs_controlF",
+                     type = "apeglm")
+
+# Merge: keep raw p‑values/FDR but use shrunken effect sizes
+res_final <- data.frame(
+  baseMean        = res_raw$baseMean,
+  log2FC_shrunken = res_shr$log2FoldChange,
+  lfcSE_shrunken  = res_shr$lfcSE,
+  pvalue          = res_raw$pvalue,
+  padj            = res_raw$padj,
+  row.names       = rownames(res_raw)
+)
+
+write.csv(res_final, "DESeq2_experimental_vs_controlF.csv")
+```
+
+## 7  Secondary contrast: experimental vs controlP  Secondary contrast: experimental vs controlP
+```{r secondary-contrast}
+# re-level reference
+dds_P <- dds
+dds_P$condition <- relevel(dds_P$condition, ref = "controlP")
+dds_P <- DESeq(dds_P)
+
+res_P_shr <- lfcShrink(dds_P, coef = "condition_experimental_vs_controlP",
+                       type = "apeglm")
+core_cols_P <- intersect(c("baseMean","log2FoldChange","lfcSE","stat",
+                           "pvalue","padj","svalue"), colnames(res_P_shr))
+write.csv(as.data.frame(res_P_shr)[ , core_cols_P],
+          "DESeq2_experimental_vs_controlP.csv")
+```
+
+## 8  Export normalised counts for reviewers
+```{r export-counts}
+write.csv(counts(dds, normalized = TRUE), "normalised_counts.csv")
+```
+#####Two chunks here from original script for doing a gsea go/KEGG analysis and some basic visualization, uncomment to run/revise (does not run as of 6/30/25)
+
+## 9  Gene-set enrichment (clusterProfiler) – GO
+#```{r gsea-go}
+# Prepare ranked gene list (all genes)
+ranked <- res_shr$log2FoldChange
+names(ranked) <- rownames(res_shr)               # ENSEMBL IDs already
+ranked <- sort(na.omit(ranked), decreasing = TRUE)
+
+# GSEA (BH adjusted)
+gse_go <- gseGO(geneList     = ranked,
+                keyType      = "ENSEMBL",
+                ont          = "ALL",
+                OrgDb        = org.Gg.eg.db,
+                nPerm        = 10000,
+                minGSSize    = 3,
+                maxGSSize    = 800,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose      = TRUE)
+
+pdf("GO_GSEA_dotplot.pdf")
+print(dotplot(gse_go, showCategory = 10, split = ".sign") +
+        facet_grid(. ~ .sign))
+dev.off()
+#```
+
+## 10  Gene-set enrichment – KEGG
+#```{r gsea-kegg}
+# Convert ENSEMBL → ENTREZ
+ids <- bitr(names(ranked), fromType = "ENSEMBL", toType = "ENTREZID",
+            OrgDb = org.Gg.eg.db)
+ids <- ids[!duplicated(ids$ENTREZID), ]
+
+rk2  <- ranked[ids$ENSEMBL]
+names(rk2) <- ids$ENTREZID
+rk2  <- sort(rk2, decreasing = TRUE)
+
+kk2 <- gseKEGG(geneList     = rk2,
+               organism     = "gga",
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "BH",
+               keyType       = "ncbi-geneid")
+
+pdf("KEGG_GSEA_dotplot.pdf")
+print(dotplot(kk2, showCategory = 10, split = ".sign") +
+        facet_grid(. ~ .sign))
+dev.off()
+#```
+
+## 11  Pathway view examples (optional – KEGG API)
+#```{r pathview, eval = FALSE}
+# pathview(gene.data = rk2, pathway.id = "gga04260", species = "gga")
+#```
+
+## 12  Session info (for reproducibility)
+```{r session-info}
+writeLines(capture.output(sessionInfo()), "sessionInfo.txt")
+```

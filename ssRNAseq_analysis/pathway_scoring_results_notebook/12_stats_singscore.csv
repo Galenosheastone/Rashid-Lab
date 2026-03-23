@@ -1,0 +1,11 @@
+pathway,test_scope,test_method,group1,group2,n_group1,n_group2,statistic,parameter,estimate,effect_type,p_value,adjust_method,note,p_adj
+necroptosis,omnibus,kruskal,,,,,0.8076923076923066,2,,,0.6677468436506435,BH,,0.6677468436506435
+TNF_NFkB,omnibus,kruskal,,,,,7.03846153846154,2,,,0.029622212723650183,BH,,0.07405553180912545
+TLR_cGAS_STING,omnibus,kruskal,,,,,4.653846153846153,2,,,0.09759557966336761,BH,,0.13942225666195374
+complement,omnibus,kruskal,,,,,8,2,,,0.01831563888873418,BH,,0.06105212962911393
+heterophil_myeloid,omnibus,kruskal,,,,,6.03846153846154,2,,,0.04883877220268604,BH,,0.09677871237283894
+angiogenesis,omnibus,kruskal,,,,,9.269230769230766,2,,,0.009709840874440654,BH,,0.048549204372203274
+osteogenesis,omnibus,kruskal,,,,,5.692307692307693,2,,,0.05806722742370336,BH,,0.09677871237283894
+ECM_remodeling,omnibus,kruskal,,,,,1.8846153846153868,2,,,0.3897274258413415,BH,,0.4330304731570461
+sterol_cholesterol_fatty_acid_metabolism,omnibus,kruskal,,,,,9.269230769230766,2,,,0.009709840874440654,BH,,0.048549204372203274
+fracture_healing,omnibus,kruskal,,,,,2.46153846153846,2,,,0.2920678236914144,BH,,0.365084779614268

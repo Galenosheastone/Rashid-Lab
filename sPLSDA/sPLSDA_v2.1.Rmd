@@ -1,0 +1,517 @@
+---
+title: "RNAseq_sPLSDA_tool"
+output: html_notebook
+---
+
+
+```{r}
+##############################################################################
+##  sPLS-DA pipeline for RNA-seq counts – header-encoded sample metadata
+##  Requires only ONE CSV file with #NAME / #CLASS rows
+##############################################################################
+
+####  USER SETTINGS  #########################################################
+count_file     <- "ExpAnalyst_format_Expt_v_ConF.csv"  # see format above
+min_count      <- 10                # gene filter
+top_var_genes  <- 5000              # keep most-variable genes
+ncomp_try      <- 2:4               # components to test
+keepX_grid     <- c(50, 100, 200)   # genes to test per component
+cv_folds       <- 5                 # M-fold CV
+cv_repeats     <- 3                 # repeat CV this many times
+out_dir        <- "splsda_results"
+##############################################################################
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+####  1.  PACKAGES  ###########################################################
+pkgs <- c("DESeq2", "mixOmics", "ggplot2", "readr", "dplyr")
+for (p in pkgs)
+  if (!requireNamespace(p, quietly = TRUE))
+    install.packages(p, repos = "https://cloud.r-project.org")
+library(DESeq2); library(mixOmics); library(ggplot2); library(dplyr)
+
+####  2.  READ COUNTS + METADATA FROM HEADER  #################################
+raw <- readr::read_csv(count_file, col_names = FALSE,
+                       progress = FALSE, show_col_types = FALSE)
+
+# --- extract header rows ----------------------------------------------------
+sample_ids <- as.character(unlist(raw[1, -1]))
+group_vec  <- as.character(unlist(raw[2, -1]))
+
+# --- build count matrix -----------------------------------------------------
+counts <- raw[-c(1, 2), ]                  # drop header rows
+gene_ids <- counts[[1]]                    # first column = gene IDs
+counts   <- as.matrix(counts[, -1])        # numeric part
+mode(counts) <- "numeric"
+
+rownames(counts) <- gene_ids
+colnames(counts) <- sample_ids
+
+# basic sanity
+stopifnot(length(sample_ids) == ncol(counts),
+          length(group_vec)  == ncol(counts))
+
+meta <- data.frame(sample = sample_ids,
+                   group  = factor(group_vec))
+
+####  3.  GENE PRE-FILTERING  #################################################
+keep <- rowSums(counts) >= min_count
+counts <- counts[keep, , drop = FALSE]
+
+####  4.  VARIANCE-STABILISING TRANSFORM  ####################################
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData   = meta,
+                              design    = ~ 1)           # no DE design
+vsd <- vst(dds, blind = TRUE)
+vst_mat <- assay(vsd)
+
+# keep top-variable genes
+vars <- apply(vst_mat, 1, var)
+top  <- names(sort(vars, decreasing = TRUE))[seq_len(min(top_var_genes,
+                                                         nrow(vst_mat)))]
+vst_mat <- vst_mat[top, ]
+
+####  5.  PREP FOR mixOmics  ##################################################
+X <- t(vst_mat)                 # samples × genes
+Y <- meta$group                 # factor
+
+ # If binary Y, we only need 1 component for PLS-DA
+ if (length(levels(Y)) == 2) {
+   message("Binary classification detected: restricting to 1 component.")
+   ncomp_try <- 1
+}
+#### 6–7.  TUNING  +  FINAL MODEL  ###########################################
+set.seed(123)
+
+# how many classes?
+n_classes <- length(levels(Y))
+
+if (n_classes == 2) {
+  ## ── BINARY CASE ───────────────────────────────────────────────────────────
+  message("Binary classification detected: skipping tune.splsda()")
+
+  # we only need 1 component
+  best_ncomp <- 1
+
+  # pick a default keepX (e.g. the smallest grid, or you could pick the median)
+  # here I choose the smallest to be conservative:
+  best_keepX <- rep(min(keepX_grid), best_ncomp)
+
+} else {
+  ## ── MULTICLASS CASE ───────────────────────────────────────────────────────
+  ## ---- 6a.  pick sensible CV folds -----------------------------------------
+  min_cl <- min(table(Y))
+  if (cv_folds > min_cl) {
+    warning("Reducing cv_folds from ", cv_folds,
+            " to ", min_cl, " (min class size).")
+    cv_folds <- min_cl
+  }
+
+  ## ---- 6b.  run tuner ------------------------------------------------------
+  max_comp <- max(ncomp_try)
+  tune <- tune.splsda(
+    X, Y,
+    ncomp        = max_comp,
+    test.keepX   = keepX_grid,
+    dist         = "max.dist",
+    validation   = "Mfold",
+    folds        = cv_folds,
+    nrepeat      = cv_repeats,
+    progressBar  = FALSE
+  )
+
+  ## ---- 6c.  harvest tuning choices -----------------------------------------
+  best_ncomp <- as.integer(unlist(tune$choice.ncomp))[1]
+  if (is.list(tune$choice.keepX)) {
+    best_keepX <- unlist(tune$choice.keepX)
+  } else {
+    best_keepX <- tune$choice.keepX
+  }
+
+  ## ---- 6d.  safety cap on component count ----------------------------------
+  n_allowed <- nrow(X) - 1
+  if (!is.na(best_ncomp) && best_ncomp > n_allowed) {
+    warning("Reducing ncomp from ", best_ncomp,
+            " to ", n_allowed, " (limited by sample size).")
+    best_ncomp <- n_allowed
+    best_keepX <- best_keepX[seq_len(best_ncomp)]
+  }
+}
+
+## ---- 7.  FINAL MODEL --------------------------------------------------------
+model <- splsda(
+  X, Y,
+  ncomp = best_ncomp,
+  keepX = best_keepX
+)
+saveRDS(model, file = file.path(out_dir, "splsda_model.rds"))
+
+##--------8. There's nothing in this part--> don't know why this was skipped-------
+
+saveRDS(model, file = file.path(out_dir, "splsda_model.rds"))
+
+#### 9.  PLOTS  ##############################################################
+# auto-switch between 1D vs 2D score plot
+plot_comps <- if (best_ncomp >= 2) 1:2 else 1
+
+pdf(file.path(out_dir, "sample_scores.pdf"), 7, 6)
+plotIndiv(
+  model,
+  comp      = plot_comps,
+  group     = Y,
+  legend    = TRUE,
+  ellipse   = (length(plot_comps) == 2),
+  ind.names = FALSE
+)
+dev.off()
+
+#### 10. EXPORT SELECTED GENES  ###############################################
+library(dplyr)            # bind_rows()
+
+sel_df <- bind_rows(lapply(seq_len(best_ncomp), function(k) {
+  v <- selectVar(model, comp = k)          # $name and $value vectors
+  data.frame(
+    Component = k,
+    Gene      = v$name,
+    Loading   = v$value,
+    stringsAsFactors = FALSE
+  )
+}))
+
+readr::write_csv(sel_df,
+                 file.path(out_dir, "selected_genes_by_component.csv"))
+
+message("✓ Selected-gene table written to ",
+        file.path(out_dir, "selected_genes_by_component.csv"))
+
+
+
+
+``` 
+
+
+```{r}
+###############################################################################
+##  ORA / GSEA for sPLS-DA selected genes
+##  (append after sPLS-DA model is complete)
+###############################################################################
+
+message("=== Enrichment analysis of sPLS-DA features ===")
+
+####  A.  PACKAGES  ###########################################################
+suppressPackageStartupMessages({
+  library(clusterProfiler)
+  library(ReactomePA)
+  library(AnnotationDbi)
+  library(org.Gg.eg.db)        # ← change if not chicken
+  library(KEGGREST)
+  library(openxlsx)
+  library(dplyr)
+})
+
+####  B.  READ SELECTED GENES ##################################################
+sel_df <- readr::read_csv(
+  file.path(out_dir, "selected_genes_by_component.csv"),
+  show_col_types = FALSE
+)
+
+if (nrow(sel_df) == 0)
+  stop("selected_genes_by_component.csv is empty – nothing to enrich!")
+
+####  C.  MAP TO ENTREZ IDs ####################################################
+## -- detect ID type (Ensembl vs Gene Symbol) -----------
+is_ens   <- all(grepl("^ENS", sel_df$Gene))
+keytype  <- if (is_ens) "ENSEMBL" else "SYMBOL"
+map_cols <- if (is_ens) c("ENTREZID", "SYMBOL") else c("ENTREZID")
+
+gene_map <- AnnotationDbi::select(
+  org.Gg.eg.db,
+  keys     = sel_df$Gene,
+  keytype  = keytype,
+  columns  = map_cols
+)
+
+sel_df <- sel_df |>
+  left_join(gene_map, by = setNames(keytype, "Gene")) |>
+  filter(!is.na(ENTREZID))
+
+if (nrow(sel_df) == 0)
+  stop("No ENTREZ IDs could be mapped for the selected genes.")
+
+####  D.  DEFINE UNIVERSE ######################################################
+## -- all genes that survived expression filtering (rows in vst_mat) ----------
+all_ids   <- rownames(vst_mat)
+univ_map  <- AnnotationDbi::select(
+  org.Gg.eg.db, keys = all_ids, keytype = keytype, columns = "ENTREZID"
+)
+gene_universe <- unique(na.omit(univ_map$ENTREZID))
+
+sig_genes <- unique(sel_df$ENTREZID)
+
+####  E.  OVER-REPRESENTATION ANALYSES ########################################
+##  E1. GO-BP ORA --------------------------------------------------------------
+ego <- enrichGO(
+  gene          = sig_genes,
+  universe      = gene_universe,
+  OrgDb         = org.Gg.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  readable      = TRUE
+)
+
+##  E2. KEGG ORA ---------------------------------------------------------------
+kegg_code <- "gga"                        # change for other species
+kmap <- KEGGREST::keggLink("pathway", kegg_code)
+kegg_term2gene <- data.frame(
+  term = sub("path:", "", unname(kmap)),
+  gene = sub(paste0(kegg_code, ":"), "", names(kmap)),
+  stringsAsFactors = FALSE
+)
+kdesc <- KEGGREST::keggList("pathway", kegg_code)
+kegg_term2name <- data.frame(
+  term = sub("path:", "", names(kdesc)),
+  name = sub(" - .*", "", unname(kdesc)),
+  stringsAsFactors = FALSE
+)
+ekegg <- enricher(
+  gene          = sig_genes,
+  universe      = gene_universe,
+  TERM2GENE     = kegg_term2gene,
+  TERM2NAME     = kegg_term2name,
+  pAdjustMethod = "BH"
+) |>
+  setReadable(org.Gg.eg.db, keyType = "ENTREZID")
+
+##  E3. Reactome ORA -----------------------------------------------------------
+ereact <- enrichPathway(
+  gene          = sig_genes,
+  universe      = gene_universe,
+  organism      = "chicken",      # human = "human", mouse = "mouse"
+  pAdjustMethod = "BH",
+  readable      = TRUE
+)
+
+####  F.  PRERANKED GSEA (GO-BP) ###############################################
+##  F1. determine which column is the loading weight --------------------------
+weight_col <- setdiff(
+  names(sel_df),
+  c("Component", "Gene", "ENTREZID", "SYMBOL", "GENEID")
+) |>
+  (\(x) x[vapply(sel_df[x], is.numeric, logical(1))])() |>
+  {\(.) .[1]}()
+
+if (is.na(weight_col))
+  stop("Could not find numeric loading column in sel_df")
+
+message("• Ranking genes by '", weight_col, "'")
+
+##  F2. build rank vector ------------------------------------------------------
+rank_vec <- sel_df |>
+  group_by(ENTREZID) |>
+  slice_max(order_by = abs(.data[[weight_col]]), n = 1, with_ties = FALSE) |>
+  arrange(desc(.data[[weight_col]])) |>
+  transmute(ENTREZID, rank = .data[[weight_col]]) |>
+  tibble::deframe()
+
+##  F3. run preranked GSEA -----------------------------------------------------
+gsea_go <- gseGO(
+  geneList      = rank_vec,
+  OrgDb         = org.Gg.eg.db,
+  ont           = "BP",
+  pAdjustMethod = "BH"
+)
+
+####  G.  WRITE RESULTS ########################################################
+as_df <- function(res, id_col = NULL) {
+  if (is.null(res) || nrow(as.data.frame(res)) == 0)
+    return(data.frame())
+  df <- as.data.frame(res)
+  if (!is.null(id_col) && id_col %in% names(df))
+    df <- dplyr::rename(df, Genes = !!id_col)
+  df
+}
+
+out_file <- file.path(out_dir, "splsda_enrichment_results.xlsx")
+write.xlsx(
+  list(
+    GO_ORA   = as_df(ego),
+    KEGG_ORA = as_df(ekegg),
+    Reactome = as_df(ereact),
+    GO_GSEA  = as_df(gsea_go, "core_enrichment")
+  ),
+  file      = out_file,
+  overwrite = TRUE
+)
+
+message("✓ Enrichment workbook saved to: ", out_file)
+
+
+```
+
+```{r}
+###############################################################################
+##  PART 3 – Quick visualisations of ORA / GSEA results
+###############################################################################
+
+suppressPackageStartupMessages({
+  library(enrichplot)
+  library(ComplexHeatmap)
+  library(UpSetR)
+  library(ggplot2)
+})
+
+viz_dir <- file.path(out_dir, "plots")
+dir.create(viz_dir, showWarnings = FALSE, recursive = TRUE)
+
+## ------------------------------------------------------------------ helpers
+save_pdf <- function(plot, filename, width = 7, height = 5) {
+  pdf(file.path(viz_dir, filename), width, height)
+  print(plot)
+  dev.off()
+}
+
+make_dot <- function(res, fname_stub, ttl, n_cat = 15) {
+  df <- as.data.frame(res)
+  if (nrow(df) == 0)
+    return(invisible())
+
+  p <- enrichplot::dotplot(res, showCategory = n_cat) +
+       labs(title = ttl, x = "Gene ratio", y = NULL)
+  save_pdf(p, paste0("dot_", fname_stub, ".pdf"),
+           width = 7,
+           height = 0.35 * n_cat + 2)
+}
+
+## ---------------------------------------------------------------- dot-plots
+make_dot(ego,      "GO_ORA",    "GO BP ORA – sPLS-DA genes")
+make_dot(ekegg,    "KEGG_ORA",  "KEGG ORA – sPLS-DA genes")
+make_dot(ereact,   "React_ORA", "Reactome ORA – sPLS-DA genes")
+make_dot(gsea_go,  "GO_GSEA",   "GO BP GSEA (loading-ranked)")
+
+## ------------------------------------------------------ cnetplot (GO ORA)
+if (exists("ego") && nrow(as.data.frame(ego)) >= 2) {
+  p_cnet <- cnetplot(ego,
+                     showCategory = min(10, nrow(as.data.frame(ego))),
+                     node_label   = "all") +
+            ggtitle("cnetplot – top GO-BP ORA terms")
+  save_pdf(p_cnet, "cnet_GO_ORA.pdf", width = 9, height = 7)
+}
+
+## ------------------------------------------------------ emapplot similarity
+if (exists("ego") && nrow(as.data.frame(ego)) >= 3) {
+  ego_sim <- pairwise_termsim(ego)
+  p_emap  <- emapplot(ego_sim,
+                      showCategory = 30) +
+             ggtitle("emapplot – GO-BP ORA term similarity")
+  save_pdf(p_emap, "emapplot_GO_ORA.pdf", width = 9, height = 7)
+}
+
+## --------------------------------------------- GSEA running-score snapshots
+if (exists("gsea_go") && nrow(as.data.frame(gsea_go)) > 0) {
+  pdf(file.path(viz_dir, "GSEA_running_scores_top3.pdf"), 9, 6)
+  for (id in head(gsea_go@result$ID, 3))
+    print(gseaplot2(gsea_go, geneSetID = id))
+  dev.off()
+}
+
+## ---------------------------------------------------------- UpSet of terms
+term_list <- list()
+if (exists("ego")   && nrow(as.data.frame(ego))   > 0)
+  term_list$GO_BP <- ego@result$Description
+if (exists("ekegg") && nrow(as.data.frame(ekegg)) > 0)
+  term_list$KEGG  <- ekegg@result$Description
+if (exists("ereact") && nrow(as.data.frame(ereact)) > 0)
+  term_list$Reactome <- ereact@result$Description
+
+if (length(term_list) >= 2) {
+  pdf(file.path(viz_dir, "UpSet_enrichment_terms.pdf"), 7, 5)
+  UpSetR::upset(
+    fromList(term_list),
+    nsets = length(term_list),
+    order.by = "freq",
+    mb.ratio = c(0.6, 0.4)
+  )
+  dev.off()
+}
+
+```
+
+
+```{r}
+###############################################################################
+##  PART 3b – Faceted dot-plot for GO-BP ORA (mean signed loading)
+###############################################################################
+
+if (exists("ego") && nrow(as.data.frame(ego)) > 0) {
+
+  library(stringr)
+  library(ggplot2)
+
+  # ---- 1.  unpack gene lists per term ---------------------------------------
+  ora_df <- ego@result |>
+    dplyr::select(ID, Description, GeneRatio, p.adjust, geneID, setSize)
+
+  ora_long <- ora_df |>
+    tidyr::separate_rows(geneID, sep = "/") |>
+    dplyr::rename(ENTREZID = geneID)
+
+  # ---- 2.  attach loading weights -------------------------------------------
+  load_tbl <- sel_df |>
+    dplyr::select(ENTREZID, Weight = !!weight_col)
+
+  ora_long <- ora_long |>
+    dplyr::left_join(load_tbl, by = "ENTREZID")
+
+  # ---- 3.  summarise mean signed loading per term ---------------------------
+  ora_scores <- ora_long |>
+    dplyr::group_by(ID, Description, GeneRatio, p.adjust, setSize) |>
+    dplyr::summarise(
+      MeanWeight = mean(Weight, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      Regulation = dplyr::case_when(
+        MeanWeight >  0  ~ "Up-regulated",
+        MeanWeight <  0  ~ "Down-regulated",
+        TRUE             ~ "Mixed / Neutral"
+      )
+    )
+
+  # keep top 10 per facet (by |MeanWeight|)
+  ora_top <- ora_scores |>
+    dplyr::group_by(Regulation) |>
+    dplyr::slice_max(order_by = abs(MeanWeight), n = 10, with_ties = FALSE) |>
+    dplyr::ungroup()
+
+  ora_top$Description <- str_wrap(ora_top$Description, 45)
+
+  # ---- 4.  plot --------------------------------------------------------------
+  p_fac_or <- ggplot(ora_top,
+                     aes(x = MeanWeight,
+                         y = reorder(Description, MeanWeight),
+                         size = setSize,
+                         colour = p.adjust)) +
+    geom_point() +
+    scale_colour_continuous(low = "red", high = "blue", name = "adj-P") +
+    scale_size(range = c(2, 6), name = "Gene set\nsize") +
+    labs(title = "GO-BP ORA pathways (sPLS-DA drivers)",
+         x = "Mean signed loading",
+         y = NULL) +
+    facet_wrap(~ Regulation, scales = "free_y") +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 9))
+
+  save_pdf(p_fac_or, "dot_GO_ORA_faceted_up_down.pdf",
+           width = 8,
+           height = 0.35 * nrow(ora_top) + 2)
+
+  message("✓ Faceted ORA dot-plot written to: ",
+          file.path(viz_dir, "dot_GO_ORA_faceted_up_down.pdf"))
+
+} else {
+  message("No GO-BP ORA results available – skipped faceted ORA plot.")
+}
+
+
+```

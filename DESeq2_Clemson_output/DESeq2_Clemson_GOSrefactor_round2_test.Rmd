@@ -1,0 +1,82 @@
+---
+title: "DESeq2_Clemson_output"
+author: "Galen O'Shea-Stone"
+date: "2025-06-30"
+output: html_document
+---
+
+
+```{r}
+
+# --- libraries
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(ggplot2)
+  library(ggrepel)   # for non-overlapping labels (optional)
+})
+
+# --- read
+expr <- read.delim("redo.ensembl.stranded.counts.renamed.subset.txt", check.names = FALSE)
+stopifnot("Geneid" %in% colnames(expr))
+rownames(expr) <- make.unique(expr$Geneid)
+
+# If from featureCounts, drop annotation columns:
+ann_cols <- intersect(colnames(expr), c("Geneid","Chr","Start","End","Strand","Length"))
+cts <- expr[ , setdiff(colnames(expr), ann_cols), drop = FALSE]
+
+# Coerce ALL counts to integer (fail if not near-integers)
+stopifnot(all(sapply(cts, is.numeric)))
+if (!all(as.matrix(cts) == round(as.matrix(cts)))) {
+  stop("Count matrix contains non-integer values. Provide raw integer counts.")
+}
+storage.mode(cts) <- "integer"
+
+# --- metadata (keep your vectors but be explicit)
+condition <- c("controlF","controlF","experimental","controlP","experimental",
+               "experimental","controlP","controlF","controlP","controlP")
+coldata <- data.frame(condition = factor(condition, levels = c("controlF","controlP","experimental")),
+                      row.names = colnames(cts))
+stopifnot(identical(rownames(coldata), colnames(cts)))
+
+# --- DESeq2
+dds <- DESeqDataSetFromMatrix(countData = cts, colData = coldata, design = ~ condition)
+
+# Prefilter: keep genes with 10+ counts in at least 2 samples
+keep <- rowSums(counts(dds) >= 10) >= 2
+dds <- dds[keep, ]
+
+dds <- DESeq(dds)
+
+# Explicit contrasts
+res_exp_vs_controlF <- results(dds, contrast = c("condition","experimental","controlF"), alpha = 0.05)
+res_ctrlP_vs_ctrlF  <- results(dds, contrast = c("condition","controlP","controlF"), alpha = 0.05)
+res_exp_vs_ctrlP    <- results(dds, contrast = c("condition","experimental","controlP"), alpha = 0.05)
+
+# Shrink LFCs (apeglm)
+suppressPackageStartupMessages(library(apeglm))
+res_exp_vs_controlF_shr <- lfcShrink(dds, contrast = c("condition","experimental","controlF"), type = "apeglm")
+res_ctrlP_vs_ctrlF_shr  <- lfcShrink(dds, contrast = c("condition","controlP","controlF"), type = "apeglm")
+res_exp_vs_ctrlP_shr    <- lfcShrink(dds, contrast = c("condition","experimental","controlP"), type = "apeglm")
+
+# Write results
+write.csv(as.data.frame(res_exp_vs_controlF_shr), "DESeq2_experimental_vs_controlF.csv", row.names = TRUE)
+write.csv(as.data.frame(res_ctrlP_vs_ctrlF_shr),  "DESeq2_controlP_vs_controlF.csv",     row.names = TRUE)
+write.csv(as.data.frame(res_exp_vs_ctrlP_shr),    "DESeq2_experimental_vs_controlP.csv", row.names = TRUE)
+
+# QC transform + PCA
+vsd <- vst(dds, blind = FALSE)
+p <- DESeq2::plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+percentVar <- round(100 * attr(p, "percentVar"))
+gp <- ggplot(p, aes(PC1, PC2, color = condition, label = name)) +
+  geom_point(size = 3) +
+  ggrepel::geom_text_repel(show.legend = FALSE) +
+  labs(x = paste0("PC1 (", percentVar[1], "%)"),
+       y = paste0("PC2 (", percentVar[2], "%)")) +
+  theme_minimal(base_size = 12)
+ggsave("DESeq2_PCA.pdf", gp, width = 6, height = 5)
+
+
+
+
+```
+

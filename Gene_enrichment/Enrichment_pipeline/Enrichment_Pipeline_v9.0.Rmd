@@ -1,0 +1,1104 @@
+---
+title: "Pygo_gene_enrichment v9.0 (reorganized, robust - KEGGREST)"
+author: "Galen O'Shea-Stone"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# =============================================================================
+# USER-EDITABLE CONFIGURATION — edit only this chunk for routine runs
+# =============================================================================
+
+## — Input / organism --------------------------------------------------------
+input_file         <- "Sacral2024_Sacral_v_Free_realigned_EXAMPLE_DATA.csv"
+species_name       <- "chicken"      # label; falls back to "Gallus gallus"
+kegg_code          <- "gga"          # KEGG organism code
+
+## — Filter thresholds --------------------------------------------------------
+padj_cutoff        <- 0.05
+logFC_cutoff       <- 2
+topN_per_direction <- 2000           # cap up & down separately before ORA
+use_table_universe <- TRUE           # FALSE = all-gene orgDb background
+minGSSize          <- 10
+maxGSSize          <- 500
+
+## — Pathview options ---------------------------------------------------------
+pathview_use_sig_only <- TRUE
+pathview_padj_cutoff  <- 0.05
+pathview_logFC_cutoff <- 2
+pathview_non_sig_mode <- "zero"      # "zero" = neutral gray; "na" = hidden
+
+## — Display counts -----------------------------------------------------------
+topN_volcano_genes   <- 40           # genes labelled in focused volcano
+N_sankey_paths       <- 10           # top KEGG pathways in Sankey
+N_gsea_running_score <- 3            # GSEA running-score panels
+N_leading_edge_top   <- 25           # bar chart genes per leading-edge term
+N_neural_ridgeplot   <- 15           # terms in neural ridgeplot
+
+## — Misc ---------------------------------------------------------------------
+install_missing    <- FALSE          # set TRUE for auto-install of missing pkgs
+set.seed(0666)
+
+## — Targeted pathways (name → KEGG ID) --------------------------------------
+targeted_pathways <- c(
+  Apoptosis                              = "gga04210",
+  Pyroptosis                             = "gga04216",
+  Necroptosis                            = "gga04217",
+  Pyroptosis_ko                          = "gga04225",   # renamed: dup key fixed
+  `HIF-1 signaling`                      = "gga04066",
+  `VEGF signaling`                       = "gga04370",
+  `ECM-receptor interaction`             = "gga04512",
+  `Focal adhesion`                       = "gga04510",
+  `Arachidonic acid metabolism`          = "gga00590",
+  `Osteoclast differentiation`           = "gga04380",
+  `Development and regeneration`         = "gga04382",
+  `TGF-beta signaling`                   = "gga04350",
+  `MAPK signaling`                       = "gga04010",
+  `Cytokine-cytokine receptor interaction` = "gga04060"
+)
+
+## — Neural keyword filter ----------------------------------------------------
+neural_keywords <- unique(c(
+  "neuro","neuron","neura","neural","synap","axon","dendrit","neur","brain","nerv",
+  "glia","myelin","schwann","spine","plasticity","cerebral","cerebell","cortex",
+  "spinal","ganglia","astrocyte","oligodendro","hippocamp","amygdala","neurite",
+  "neuritogen","growth cone","axon elongat","axon outgrowth","axon extension",
+  "dendrite outgrowth","dendrite extension","neuron projection","neuronal projection",
+  "growth-cone cytoskeleton","filopodia","lamellipod","microtubule polymeriz",
+  "actin cytoskelet","neurotransm","neuropept","neuromodul","autonom",
+  "sympathetic","parasympathetic","neuromuscular","neurogenesis","axonogen",
+  "myelination","microglia",
+  "Nervous system","Neurodegenerative","Sensory system"
+))
+neural_pattern <- paste(neural_keywords, collapse = "|")
+
+## — Output directories -------------------------------------------------------
+outdir           <- "output"
+dir_plots        <- file.path(outdir, "plots")
+dir_dotplots     <- file.path(outdir, "plots", "dotplots")
+dir_neural_plots <- file.path(outdir, "plots", "neural")
+dir_data         <- file.path(outdir, "data")
+dir_pathview     <- file.path(outdir, "pathview")
+dir_interactive  <- file.path(outdir, "interactive")
+
+for (d in c(outdir, dir_plots, dir_dotplots, dir_neural_plots,
+            dir_data, dir_pathview, dir_interactive)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+```
+
+```{r packages, include=FALSE}
+# =============================================================================
+# PACKAGES
+# =============================================================================
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+cran_pkgs <- c("UpSetR","EnhancedVolcano","stringr","glue","openxlsx",
+               "ggplot2","dplyr","tidyr","networkD3","htmlwidgets","grid","png",
+               "withr")
+
+bio_pkgs  <- c("clusterProfiler","ReactomePA","pathview","AnnotationDbi",
+               "ComplexHeatmap","circlize","KEGGREST","org.Gg.eg.db",
+               "BiocParallel","enrichplot")
+
+maybe_install <- function(pkgs, bioc = FALSE) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE) && isTRUE(install_missing)) {
+      if (bioc) BiocManager::install(p, ask = FALSE, update = FALSE)
+      else      install.packages(p, dependencies = TRUE)
+    }
+  }
+}
+maybe_install(cran_pkgs, bioc = FALSE)
+maybe_install(bio_pkgs,  bioc = TRUE)
+
+suppressPackageStartupMessages({
+  library(clusterProfiler); library(ReactomePA);    library(pathview)
+  library(AnnotationDbi);   library(dplyr);         library(ggplot2)
+  library(openxlsx);        library(ComplexHeatmap); library(circlize)
+  library(UpSetR);          library(EnhancedVolcano); library(enrichplot)
+  library(stringr);         library(glue);           library(KEGGREST)
+  library(org.Gg.eg.db);   library(tidyr);          library(BiocParallel)
+  library(grid);            library(networkD3);      library(htmlwidgets)
+  library(withr)
+})
+
+orgDb <- org.Gg.eg.db
+
+# Parallel workers (Windows: SnowParam; others: MulticoreParam)
+if (.Platform$OS.type == "windows") {
+  param <- SnowParam(workers = max(1, parallel::detectCores() - 1))
+} else {
+  param <- MulticoreParam(workers = max(1, parallel::detectCores() - 1))
+}
+register(param)
+
+theme_set(theme_bw(base_size = 11))
+```
+
+```{r helpers, include=FALSE}
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# detect_columns(df)
+#   Flexible column detection by common name aliases; falls back to positions.
+#   Returns: named int vector c(gcol, lcol, pcol)
+# -----------------------------------------------------------------------------
+detect_columns <- function(df) {
+  normalize_nm <- function(x) tolower(gsub("[^a-z0-9]+", "", x))
+  nm <- normalize_nm(names(df))
+  find_col <- function(cands, default_idx) {
+    idx <- which(nm %in% normalize_nm(cands))
+    if (length(idx) == 0) default_idx else idx[1]
+  }
+  gene_cands  <- c("gene","genes","symbol","gene_symbol","hgnc","mgi",
+                   "ensembl","ensemblid","ensembl_id")
+  logfc_cands <- c("logfc","log2fc","log2foldchange","log2_fold_change",
+                   "lfc","log2fc.wald","stat")
+  padj_cands  <- c("padj","p_adj","p.adjust","p_adjust","adj.p.val",
+                   "adj_p_val","fdr","qvalue","q_value")
+  c(gcol = find_col(gene_cands,  1L),
+    lcol = find_col(logfc_cands, 2L),
+    pcol = find_col(padj_cands,  3L))
+}
+
+# -----------------------------------------------------------------------------
+# map_gene_ids(df, orgDb, keytype = NULL)
+#   Detects Ensembl vs Symbol, maps to ENTREZID/SYMBOL, drops unmatched rows.
+#   Returns: augmented tibble with ENTREZID, SYMBOL, gene_label columns
+# -----------------------------------------------------------------------------
+map_gene_ids <- function(df, orgDb, keytype = NULL) {
+  if (is.null(keytype)) {
+    keytype <- if (all(grepl("^ENS", df$gene, ignore.case = FALSE))) "ENSEMBL" else "SYMBOL"
+  }
+  message("Detected keytype: ", keytype)
+  map_cols <- if (keytype == "ENSEMBL") c("ENTREZID","SYMBOL") else c("ENTREZID","ENSEMBL")
+  gene_map <- AnnotationDbi::select(orgDb, keys = df$gene,
+                                    columns = map_cols, keytype = keytype)
+  df <- dplyr::left_join(df, gene_map, by = setNames(keytype, "gene")) %>%
+    dplyr::filter(!is.na(ENTREZID))
+  if (!"SYMBOL" %in% names(df)) df$SYMBOL <- NA_character_
+  df <- df %>% dplyr::mutate(gene_label = dplyr::coalesce(SYMBOL, gene))
+  df
+}
+
+# -----------------------------------------------------------------------------
+# render_pathway(pathway_id, gene_data, kegg_outdir, label, out_suffix, ...)
+#   Renders a pathview diagram using withr::with_dir (no setwd side-effects).
+#   try_ko_retry=TRUE also renders the ko reference map.
+#   Returns: data.frame of render metadata row(s), or NULL on total failure
+# -----------------------------------------------------------------------------
+render_pathway <- function(pathway_id, gene_data, kegg_outdir, label,
+                           out_suffix, ko_gene_data = NULL,
+                           kegg_desc = NULL, try_ko_retry = FALSE) {
+  rows       <- list()
+  use_species <- if (startsWith(pathway_id, "ko")) "ko" else kegg_code
+  clean_id   <- sub("^(gga|ko)", "", pathway_id)
+  kegg_id    <- paste0(use_species, clean_id)
+  safe_sfx   <- gsub("[^a-z0-9]+", "_", tolower(out_suffix))
+
+  # Primary render
+  tryCatch({
+    withr::with_dir(kegg_outdir, {
+      pathview(gene.data  = gene_data,
+               pathway.id = clean_id,
+               species    = use_species,
+               out.suffix = paste0("logFC_", safe_sfx))
+    })
+    basefile <- paste0(kegg_id, ".logFC_", safe_sfx)
+    png_file <- file.path(kegg_outdir, paste0(basefile, ".png"))
+    labeled  <- label_png(png_file, paste(label, kegg_id, sep = " - "))
+    rows[[length(rows) + 1]] <- data.frame(
+      Pathway_ID  = kegg_id,
+      Description = label,
+      Species     = use_species,
+      PNG_File    = file.path("pathview", basename(if (is.null(labeled)) png_file else labeled)),
+      PDF_File    = file.path("pathview", paste0(basefile, ".pdf")),
+      stringsAsFactors = FALSE
+    )
+  }, error = function(e) message("Pathview error for ", kegg_id, ": ", e$message))
+
+  # Optional ko retry
+  if (isTRUE(try_ko_retry) && use_species != "ko" && !is.null(ko_gene_data)) {
+    message("Retrying ", label, " with KEGG 'ko' reference map.")
+    tryCatch({
+      ko_sfx <- paste0(safe_sfx, "_ko")
+      withr::with_dir(kegg_outdir, {
+        pathview(gene.data  = ko_gene_data,
+                 pathway.id = clean_id,
+                 species    = "ko",
+                 out.suffix = paste0("logFC_", ko_sfx))
+      })
+      basefile <- paste0("ko", clean_id, ".logFC_", ko_sfx)
+      png_file <- file.path(kegg_outdir, paste0(basefile, ".png"))
+      labeled  <- label_png(png_file, paste(label, "ko", clean_id, sep = " - "))
+      rows[[length(rows) + 1]] <- data.frame(
+        Pathway_ID  = paste0("ko", clean_id),
+        Description = label,
+        Species     = "ko",
+        PNG_File    = file.path("pathview", basename(if (is.null(labeled)) png_file else labeled)),
+        PDF_File    = file.path("pathview", paste0(basefile, ".pdf")),
+        stringsAsFactors = FALSE
+      )
+    }, error = function(e2) message("Pathview ko error for ", pathway_id, ": ", e2$message))
+  }
+
+  if (length(rows) == 0) return(NULL)
+  do.call(rbind, rows)
+}
+
+# -----------------------------------------------------------------------------
+# save_plot(p, filename, w=7, h=5, subdir=NULL)
+#   Saves PDF always; SVG too if svglite is available.
+#   subdir defaults to dir_plots when NULL is passed.
+# -----------------------------------------------------------------------------
+save_plot <- local({
+  can_svg <- suppressWarnings(requireNamespace("svglite", quietly = TRUE))
+  function(p, filename, w = 7, h = 5, subdir = NULL) {
+    base <- if (is.null(subdir)) dir_plots else subdir
+    fpdf <- file.path(base, filename)
+    ggsave(fpdf, plot = p, width = w, height = h, units = "in", dpi = 300)
+    if (endsWith(filename, ".pdf") && isTRUE(can_svg)) {
+      fsvg <- file.path(base, sub("\\.pdf$", ".svg", filename))
+      ggsave(fsvg, plot = p, width = w, height = h, units = "in", dpi = 300)
+    }
+  }
+})
+
+# -----------------------------------------------------------------------------
+# export_sheets(sheet_list, filename, subdir = dir_data)
+#   Writes a named list of data frames to a multi-sheet xlsx.
+#   Returns: invisible file path
+# -----------------------------------------------------------------------------
+export_sheets <- function(sheet_list, filename, subdir = dir_data) {
+  wb <- openxlsx::createWorkbook()
+  for (nm in names(sheet_list)) {
+    openxlsx::addWorksheet(wb, nm)
+    df <- sheet_list[[nm]]
+    if (is.null(df) || nrow(as.data.frame(df)) == 0) {
+      openxlsx::writeData(wb, nm, data.frame(Note = "No results"))
+    } else {
+      openxlsx::writeData(wb, nm, as.data.frame(df))
+    }
+  }
+  out <- file.path(subdir, filename)
+  openxlsx::saveWorkbook(wb, out, overwrite = TRUE)
+  invisible(out)
+}
+
+# -----------------------------------------------------------------------------
+# filter_neural(result_obj, pattern = neural_pattern)
+#   Accepts S4 enrichResult or plain data.frame; always returns data.frame.
+# -----------------------------------------------------------------------------
+filter_neural <- function(result_obj, pattern = neural_pattern) {
+  df <- if (inherits(result_obj, "data.frame")) result_obj else as.data.frame(result_obj)
+  if (is.null(df) || nrow(df) == 0 || !"Description" %in% names(df)) return(data.frame())
+  df[grepl(pattern, df$Description, ignore.case = TRUE), , drop = FALSE]
+}
+
+# -----------------------------------------------------------------------------
+# safe_run(expr, label = "")
+#   Wraps tryCatch; returns result or NULL on error.
+# -----------------------------------------------------------------------------
+safe_run <- function(expr, label = "") {
+  tryCatch(expr, error = function(e) {
+    message(if (nzchar(label)) paste0("[", label, "] "), "Error: ", e$message)
+    NULL
+  })
+}
+
+# — Utility helpers (unchanged from v8) ----------------------------------------
+
+label_png <- function(infile, label, outfile = NULL) {
+  if (!requireNamespace("png", quietly = TRUE)) return(invisible(NULL))
+  if (!file.exists(infile)) return(invisible(NULL))
+  if (is.null(outfile)) outfile <- sub("\\.png$", "_labeled.png", infile)
+  img <- png::readPNG(infile)
+  png(filename = outfile, width = dim(img)[2], height = dim(img)[1])
+  grid::grid.raster(img, width = unit(1, "npc"), height = unit(1, "npc"))
+  grid::grid.text(label, x = unit(0.02, "npc"), y = unit(0.98, "npc"),
+                  just = c("left","top"),
+                  gp = grid::gpar(col = "black", fontsize = 12, fontface = "bold"))
+  dev.off()
+  outfile
+}
+
+as_df <- function(res, id_col = "geneID") {
+  if (is.null(res) || nrow(as.data.frame(res)) == 0) return(data.frame())
+  dplyr::rename(as.data.frame(res), Genes = !!id_col)
+}
+
+kegg_pathway_exists <- function(pid, kegg_desc) {
+  pid <- sub("^path:", "", pid)
+  any(names(kegg_desc) == paste0("path:", pid))
+}
+
+get_kegg_pathway_genes <- function(pid, kegg_desc) {
+  pid <- sub("^path:", "", pid)
+  if (!kegg_pathway_exists(pid, kegg_desc)) return(character(0))
+  info <- tryCatch(KEGGREST::keggGet(pid), error = function(e) NULL)
+  if (is.null(info) || length(info) == 0 || is.null(info[[1]]$GENE)) return(character(0))
+  gene_entries <- info[[1]]$GENE
+  gene_ids <- as.character(gene_entries[seq(1, length(gene_entries), 2)])
+  gene_ids[!is.na(gene_ids)]
+}
+
+make_dot <- function(res, stub, title, n_cat = 15, wrap_width = 45,
+                     text_size = 9, text_angle = 0, w = 7, h = 5,
+                     subdir = dir_dotplots) {
+  df <- as.data.frame(res); if (nrow(df) == 0) return(invisible())
+  df <- df[seq_len(min(n_cat, nrow(df))), ]
+  df$Description <- stringr::str_wrap(df$Description, width = wrap_width)
+  if (all(c("GeneRatio","Count") %in% names(df))) {
+    df$GeneRatioNum <- vapply(strsplit(df$GeneRatio, "/"),
+                              function(x) as.numeric(x[1]) / as.numeric(x[2]), numeric(1))
+    x_var <- "GeneRatioNum"; x_lab <- "Gene ratio"; size_var <- "Count"
+  } else if (all(c("NES","setSize") %in% names(df))) {
+    x_var <- "NES"; x_lab <- "NES"; size_var <- "setSize"
+  } else return(invisible())
+  p <- ggplot(df, aes_string(x = x_var,
+                             y = paste0("reorder(Description,", x_var, ")"),
+                             size = size_var, colour = "p.adjust")) +
+    geom_point() +
+    scale_colour_continuous(trans = "reverse", name = "adj-P") +
+    scale_size(range = c(2, 6)) +
+    labs(title = title, x = x_lab, y = NULL) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = text_size, angle = text_angle,
+                                     hjust = ifelse(text_angle == 0, 1, 0.5)))
+  save_plot(p, sprintf("dotplot_%s.pdf", stub), w, h, subdir = subdir)
+}
+
+make_upset <- function(term_list, tag, subdir = dir_plots) {
+  comb_mat <- ComplexHeatmap::make_comb_mat(term_list)
+  comb_mat <- comb_mat[order(ComplexHeatmap::comb_size(comb_mat), decreasing = TRUE)]
+  left_anno <- ComplexHeatmap::rowAnnotation(
+    "Set size" = ComplexHeatmap::anno_barplot(
+      ComplexHeatmap::set_size(comb_mat),
+      gp = grid::gpar(fill = "grey40"), border = FALSE,
+      bar_width = 0.9, axis_param = list(side = "bottom")))
+  top_anno <- ComplexHeatmap::upset_top_annotation(
+    comb_mat, add_numbers = TRUE, gp = grid::gpar(fill = "steelblue"))
+  for (ext in c("pdf","png")) {
+    outf <- file.path(subdir, glue("upset_{tag}.{ext}"))
+    if (ext == "pdf") pdf(outf, 7, 5) else png(outf, 1400, 1000, res = 200)
+    ht <- ComplexHeatmap::UpSet(
+      comb_mat, left_annotation = left_anno, top_annotation = top_anno,
+      show_row_names = TRUE,
+      row_names_gp = grid::gpar(fontsize = 10, fontface = "bold"),
+      set_order = rev(names(term_list)))
+    ComplexHeatmap::draw(ht); dev.off()
+  }
+  mat <- UpSetR::fromList(term_list)
+  pdf(file.path(subdir, glue("upset_{tag}_UpSetR.pdf")), 8, 6)
+  UpSetR::upset(mat, sets = colnames(mat), nsets = ncol(mat), nintersects = NA,
+                order.by = "freq", keep.order = TRUE, main.bar.color = "darkred",
+                sets.bar.color = "steelblue")
+  try({
+    bars_y <- grid::convertY(grid::unit(UpSetR::upset_plot_env$Main_bar_y, "native"),
+                             "npc", valueOnly = TRUE)
+    bars_x <- grid::convertX(grid::unit(UpSetR::upset_plot_env$Main_bar_x, "native"),
+                             "npc", valueOnly = TRUE)
+    counts <- UpSetR::upset_plot_env$Main_bar_data$freq
+    grid::grid.text(counts, x = bars_x, y = bars_y + 0.02, gp = grid::gpar(cex = 0.7))
+  }, silent = TRUE)
+  dev.off()
+}
+```
+
+```{r data-prep, include=FALSE}
+# =============================================================================
+# DATA PREPARATION
+# =============================================================================
+
+tbl_raw <- read.csv(input_file, check.names = FALSE)
+
+if (ncol(tbl_raw) < 3)
+  stop("Expected at least 3 columns (gene, logFC, padj). Got: ", ncol(tbl_raw))
+
+# Uniquify duplicate header names for safe extraction
+orig_names <- names(tbl_raw)
+names(tbl_raw) <- make.unique(orig_names)
+
+cols <- detect_columns(tbl_raw)
+gcol <- cols["gcol"]; lcol <- cols["lcol"]; pcol <- cols["pcol"]
+
+# Build clean 3-column table with numeric coercion
+suppressWarnings({
+  tbl <- tibble::tibble(
+    gene  = as.character(tbl_raw[[gcol]]),
+    logFC = as.numeric(tbl_raw[[lcol]]),
+    padj  = as.numeric(tbl_raw[[pcol]])
+  )
+})
+
+if (all(is.na(tbl$logFC)))
+  stop("Could not parse logFC column as numeric (source col index ", lcol, ").")
+if (all(is.na(tbl$padj)))
+  stop("Could not parse padj column as numeric (source col index ", pcol, ").")
+
+# Strip Ensembl version suffix (e.g. ENSGALG00000000001.3 → ...0001)
+tbl$gene <- sub("\\.\\d+$", "", tbl$gene)
+
+# Map to ENTREZID + SYMBOL
+tbl <- map_gene_ids(tbl, orgDb)
+
+# Universe
+if (use_table_universe) {
+  gene_universe <- unique(as.character(tbl$ENTREZID))
+} else {
+  gene_universe <- keys(orgDb, keytype = "ENTREZID")
+}
+
+# Significant gene sets (capped per direction)
+tbl_sig_base <- tbl %>% dplyr::filter(padj < padj_cutoff, abs(logFC) >= logFC_cutoff)
+up_sig   <- tbl_sig_base %>% dplyr::filter(logFC > 0) %>%
+            dplyr::arrange(dplyr::desc(logFC)) %>% dplyr::slice_head(n = topN_per_direction)
+down_sig <- tbl_sig_base %>% dplyr::filter(logFC < 0) %>%
+            dplyr::arrange(logFC) %>% dplyr::slice_head(n = topN_per_direction)
+tbl_sig  <- dplyr::bind_rows(up_sig, down_sig)
+sig_genes <- unique(as.character(tbl_sig$ENTREZID))
+
+# Summary statistics
+num_input    <- nrow(tbl_raw)
+num_mapped   <- nrow(tbl)
+num_unmapped <- num_input - num_mapped
+num_universe <- length(gene_universe)
+num_sig      <- length(sig_genes)
+pct_sig      <- if (num_universe > 0) 100 * num_sig / num_universe else NA_real_
+
+cat(sprintf(
+  "\n====== SUMMARY ======\nInput genes : %d\nMapped genes: %d\nUnmapped    : %d\nUniverse    : %d\nTest set    : %d (%.1f%%)\n",
+  num_input, num_mapped, num_unmapped, num_universe, num_sig, pct_sig))
+
+summary_stats <- data.frame(
+  Step       = c("Input genes","Mapped genes","Unmapped genes","Universe","Test set"),
+  Gene_Count = c(num_input, num_mapped, num_unmapped, num_universe, num_sig),
+  Percent    = c(NA,
+                 if (num_input > 0) 100 * num_mapped / num_input else NA,
+                 if (num_input > 0) 100 * num_unmapped / num_input else NA,
+                 NA, pct_sig)
+)
+
+# Up/down counts table
+up_down_counts <- tbl %>%
+  dplyr::mutate(Regulation = dplyr::case_when(
+    logFC >=  logFC_cutoff & padj < padj_cutoff ~ "Up",
+    logFC <= -logFC_cutoff & padj < padj_cutoff ~ "Down",
+    TRUE ~ "NoChange")) %>%
+  dplyr::filter(Regulation %in% c("Up","Down")) %>%
+  dplyr::count(Regulation, name = "Gene_Count") %>%
+  dplyr::mutate(Percent = round(100 * Gene_Count / sum(Gene_Count), 1))
+
+# Per-gene logFC summary
+gene_common_summary <- tbl %>%
+  dplyr::group_by(ENTREZID, gene_label) %>%
+  dplyr::summarise(
+    Avg_LogFC = mean(logFC, na.rm = TRUE),
+    Avg_Padj  = mean(padj, na.rm = TRUE),
+    N_Records = dplyr::n(),
+    Direction = dplyr::case_when(
+      mean(logFC, na.rm = TRUE) >=  logFC_cutoff ~ "Up",
+      mean(logFC, na.rm = TRUE) <= -logFC_cutoff ~ "Down",
+      TRUE ~ "NoChange"),
+    .groups = "drop") %>%
+  dplyr::arrange(dplyr::desc(abs(Avg_LogFC)))
+```
+
+```{r enrichment, include=FALSE}
+# =============================================================================
+# ENRICHMENT — GSEA ranks + ORA + GSEA + KEGG CLASS annotation
+# =============================================================================
+
+# Validate species label
+valid_species <- c("Gallus gallus","chicken","gallus gallus")
+if (!tolower(species_name) %in% tolower(valid_species)) {
+  warning(glue::glue("Unknown species_name '{species_name}'. Using 'Gallus gallus'."))
+  species_name <- "Gallus gallus"
+} else if (tolower(species_name) != "gallus gallus") {
+  species_name <- "Gallus gallus"
+}
+
+# GSEA rank vector (prefer stat column, fall back to logFC)
+rank_col <- if ("stat" %in% names(tbl)) "stat" else "logFC"
+tbl_nodup <- tbl %>%
+  dplyr::group_by(ENTREZID) %>%
+  dplyr::slice_max(order_by = abs(.data[[rank_col]]), n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup()
+ranks <- tbl_nodup %>%
+  dplyr::arrange(dplyr::desc(.data[[rank_col]])) %>%
+  dplyr::transmute(ENTREZID, rnk = .data[[rank_col]]) %>%
+  tibble::deframe()
+
+# — GO BP / MF ORA -----------------------------------------------------------
+ego <- enrichGO(gene = sig_genes, OrgDb = orgDb, keyType = "ENTREZID",
+                ont = "BP", universe = gene_universe, pAdjustMethod = "BH",
+                readable = TRUE, minGSSize = minGSSize, maxGSSize = maxGSSize)
+ego_MF <- enrichGO(gene = sig_genes, OrgDb = orgDb, keyType = "ENTREZID",
+                   ont = "MF", universe = gene_universe, pAdjustMethod = "BH",
+                   readable = TRUE, minGSSize = minGSSize, maxGSSize = maxGSSize)
+
+ego    <- tryCatch(simplify(ego,    cutoff = 0.7, by = "p.adjust", select_fun = min),
+                   error = function(e) ego)
+ego_MF <- tryCatch(simplify(ego_MF, cutoff = 0.7, by = "p.adjust", select_fun = min),
+                   error = function(e) ego_MF)
+
+# — KEGG ORA (via KEGGREST + enricher, with caching) -------------------------
+safe_keggLink <- function(to, org) tryCatch(KEGGREST::keggLink(to, org), error = function(e) NULL)
+safe_keggList <- function(db, org) tryCatch(KEGGREST::keggList(db, org), error = function(e) NULL)
+
+cache_maps <- file.path(dir_data, "kegg_maps.rds")
+if (file.exists(cache_maps)) {
+  kmaps <- readRDS(cache_maps)
+  kmap  <- kmaps$kmap; kdesc <- kmaps$kdesc
+} else {
+  kmap  <- safe_keggLink("pathway", kegg_code)
+  kdesc <- safe_keggList("pathway", kegg_code)
+  if (is.null(kmap) || is.null(kdesc)) stop("KEGGREST failed; check network and retry.")
+  saveRDS(list(kmap = kmap, kdesc = kdesc), cache_maps)
+  writeLines(paste("KEGG mappings fetched:", Sys.Date()),
+             file.path(dir_data, "KEGG_fetch_date.txt"))
+}
+
+kegg_term2gene <- data.frame(
+  term = sub("path:",            "", unname(kmap)),
+  gene = sub(paste0(kegg_code, ":"), "", names(kmap)),
+  stringsAsFactors = FALSE)
+kegg_term2name <- data.frame(
+  term = sub("path:", "", names(kdesc)),
+  name = sub(" - .*", "", unname(kdesc)),
+  stringsAsFactors = FALSE)
+
+# KO mapping (for ko-species pathview rendering)
+cache_ko_map <- file.path(dir_data, "kegg_ko_map.rds")
+if (file.exists(cache_ko_map)) {
+  ko_map <- readRDS(cache_ko_map)
+} else {
+  ko_map <- safe_keggLink("ko", kegg_code)
+  if (!is.null(ko_map)) saveRDS(ko_map, cache_ko_map)
+}
+ko_fc_vec <- numeric(0)
+if (!is.null(ko_map)) {
+  ko_df <- data.frame(
+    ENTREZID = sub(paste0("^", kegg_code, ":"), "", names(ko_map)),
+    KO       = sub("^ko:", "", unname(ko_map)),
+    stringsAsFactors = FALSE)
+  ko_fc_tbl <- tbl %>%
+    dplyr::select(ENTREZID, logFC) %>%
+    dplyr::left_join(ko_df, by = "ENTREZID") %>%
+    dplyr::filter(!is.na(KO)) %>%
+    dplyr::group_by(KO) %>%
+    dplyr::summarise(logFC = mean(logFC, na.rm = TRUE), .groups = "drop")
+  ko_fc_vec <- setNames(ko_fc_tbl$logFC, ko_fc_tbl$KO)
+}
+
+ekegg <- enricher(gene = sig_genes, universe = gene_universe,
+                  TERM2GENE = kegg_term2gene, TERM2NAME = kegg_term2name,
+                  pAdjustMethod = "BH", minGSSize = minGSSize, maxGSSize = maxGSSize)
+if (nrow(as.data.frame(ekegg)) > 0)
+  ekegg <- setReadable(ekegg, orgDb, keyType = "ENTREZID")
+ekegg_df <- as.data.frame(ekegg)
+if (nrow(ekegg_df) == 0) ekegg_df <- tibble::tibble()
+
+# — Reactome ORA -------------------------------------------------------------
+ereact <- tryCatch(
+  enrichPathway(gene = sig_genes, universe = gene_universe, organism = "chicken",
+                pAdjustMethod = "BH", readable = FALSE,
+                minGSSize = minGSSize, maxGSSize = maxGSSize),
+  error = function(e) {
+    message("ReactomePA::enrichPathway failed: ", e$message)
+    new("enrichResult")
+  })
+if (inherits(ereact, "enrichResult") && nrow(as.data.frame(ereact)) > 0)
+  ereact <- setReadable(ereact, orgDb, keyType = "ENTREZID")
+
+# — GSEA (GO BP, GO MF, KEGG) ------------------------------------------------
+gsea_go <- gseGO(geneList = ranks, OrgDb = orgDb, ont = "BP",
+                 pAdjustMethod = "BH", minGSSize = minGSSize, maxGSSize = maxGSSize)
+gsea_go_readable <- setReadable(gsea_go, orgDb, keyType = "ENTREZID")
+
+gsea_go_MF <- gseGO(geneList = ranks, OrgDb = orgDb, ont = "MF",
+                    pAdjustMethod = "BH", minGSSize = minGSSize, maxGSSize = maxGSSize)
+
+gsea_kegg <- gseKEGG(geneList = ranks, organism = kegg_code,
+                     pAdjustMethod = "BH", minGSSize = minGSSize,
+                     maxGSSize = maxGSSize, verbose = FALSE)
+
+# — KEGG CLASS annotation ----------------------------------------------------
+if (nrow(ekegg_df) > 0) {
+  message("Annotating KEGG pathways with CLASS...")
+  kinfo <- tryCatch(KEGGREST::keggGet(ekegg_df$ID), error = function(e) NULL)
+  if (!is.null(kinfo)) {
+    class_df <- data.frame(
+      ID    = vapply(kinfo, function(x) sub("path:", "", x$ENTRY),  ""),
+      Class = vapply(kinfo, function(x) paste(x$CLASS, collapse = "; "), ""),
+      stringsAsFactors = FALSE)
+    ekegg_df <- dplyr::left_join(ekegg_df, class_df, by = "ID")
+    ekegg@result <- ekegg_df
+  }
+}
+
+# Convenience fold-change vector (ENTREZID → logFC)
+fc_vec <- setNames(tbl$logFC, tbl$ENTREZID)
+```
+
+```{r pathview, include=FALSE}
+# =============================================================================
+# PATHVIEW DIAGRAMS
+# =============================================================================
+
+# Build pathview gene data vector (optionally zero/NA non-significant genes)
+pathview_fc_vec <- fc_vec
+if (isTRUE(pathview_use_sig_only)) {
+  sig_ids <- tbl %>%
+    dplyr::filter(padj < pathview_padj_cutoff, abs(logFC) >= pathview_logFC_cutoff) %>%
+    dplyr::pull(ENTREZID) %>% unique()
+  non_sig <- !names(pathview_fc_vec) %in% sig_ids
+  if (identical(pathview_non_sig_mode, "zero")) {
+    pathview_fc_vec[non_sig] <- 0
+  } else {
+    pathview_fc_vec[non_sig] <- NA_real_
+  }
+}
+
+all_pathview_guides    <- list()
+kegg_pathway_gene_checks <- list()
+
+# — Top KEGG ORA pathways ----------------------------------------------------
+if (nrow(ekegg_df) > 0) {
+  top_kegg <- head(ekegg_df$ID,          N_sankey_paths)
+  top_desc <- head(ekegg_df$Description, N_sankey_paths)
+  guide_rows <- list()
+  for (i in seq_along(top_kegg)) {
+    message("Rendering KEGG diagram for ", top_kegg[i])
+    rows <- render_pathway(
+      pathway_id  = top_kegg[i],
+      gene_data   = pathview_fc_vec,
+      kegg_outdir = dir_pathview,
+      label       = top_desc[i],
+      out_suffix  = top_desc[i])
+    if (!is.null(rows)) guide_rows <- c(guide_rows, list(rows))
+  }
+  if (length(guide_rows) > 0) {
+    kegg_guide <- do.call(rbind, guide_rows)
+    all_pathview_guides$Top_KEGG_ORA <- kegg_guide
+  }
+}
+
+# — Targeted pathway list ----------------------------------------------------
+target_guide_rows <- list()
+for (path_name in names(targeted_pathways)) {
+  pid <- targeted_pathways[[path_name]]
+  message("Rendering targeted pathway: ", path_name, " (", pid, ")")
+  rows <- render_pathway(
+    pathway_id   = pid,
+    gene_data    = pathview_fc_vec,
+    kegg_outdir  = dir_pathview,
+    label        = path_name,
+    out_suffix   = path_name,
+    ko_gene_data = ko_fc_vec,
+    kegg_desc    = kdesc,
+    try_ko_retry = TRUE)
+  if (!is.null(rows)) target_guide_rows <- c(target_guide_rows, list(rows))
+
+  # Gene-presence check
+  clean_id <- sub("^(gga|ko)", "", pid)
+  use_species <- if (startsWith(pid, "ko")) "ko" else kegg_code
+  kegg_id <- paste0(use_species, clean_id)
+  pathway_genes <- get_kegg_pathway_genes(kegg_id, kdesc)
+  genes_in_data <- intersect(pathway_genes, as.character(tbl$ENTREZID))
+  kegg_pathway_gene_checks[[length(kegg_pathway_gene_checks) + 1]] <- data.frame(
+    Pathway_Name        = path_name,
+    Pathway_ID          = kegg_id,
+    Total_Pathway_Genes = length(pathway_genes),
+    Genes_In_Dataset    = length(genes_in_data),
+    Dataset_EntrezIDs   = paste(genes_in_data, collapse = "/"),
+    stringsAsFactors = FALSE)
+}
+
+# Forced ko reference map for osteoclast differentiation
+message("Rendering forced ko reference map for osteoclast differentiation (map04380).")
+forced_rows <- render_pathway(
+  pathway_id   = "ko04380",
+  gene_data    = ko_fc_vec,
+  kegg_outdir  = dir_pathview,
+  label        = "Osteoclast differentiation (forced ko map)",
+  out_suffix   = "osteoclast_forced_ko")
+if (!is.null(forced_rows)) target_guide_rows <- c(target_guide_rows, list(forced_rows))
+
+if (length(target_guide_rows) > 0) {
+  target_pathway_guide <- do.call(rbind, target_guide_rows)
+  all_pathview_guides$Targeted_Pathways <- target_pathway_guide
+}
+if (length(kegg_pathway_gene_checks) > 0)
+  kegg_pathway_gene_checks <- do.call(rbind, kegg_pathway_gene_checks)
+```
+
+```{r exports, include=FALSE}
+# =============================================================================
+# EXPORTS — all write operations in one place
+# =============================================================================
+
+# Summary stats
+openxlsx::write.xlsx(summary_stats,
+                     file = file.path(dir_data, "summary_stats.xlsx"), overwrite = TRUE)
+
+# Per-gene logFC summary
+write.csv(gene_common_summary,
+          file = file.path(dir_data, "common_gene_logFC_summary.csv"), row.names = FALSE)
+openxlsx::write.xlsx(gene_common_summary,
+                     file = file.path(dir_data, "common_gene_logFC_summary.xlsx"),
+                     overwrite = TRUE)
+
+# Up / down summary
+export_sheets(
+  list(UpDown_Counts = up_down_counts, Up_Genes = up_sig, Down_Genes = down_sig),
+  "up_vs_down_summary.xlsx")
+
+# Main enrichment results
+export_sheets(
+  list(GO_BP_ORA    = as_df(ego),
+       GO_MF_ORA    = as_df(ego_MF),
+       KEGG_ORA     = as_df(ekegg),
+       Reactome_ORA = as_df(ereact),
+       GO_BP_GSEA   = as_df(gsea_go,    "core_enrichment"),
+       GO_MF_GSEA   = as_df(gsea_go_MF, "core_enrichment"),
+       Summary      = summary_stats),
+  "enrichment_results_with_genes_and_summary.xlsx")
+
+# KEGG GSEA
+openxlsx::write.xlsx(as.data.frame(gsea_kegg),
+                     file = file.path(dir_data, "KEGG_GSEA_results.xlsx"), overwrite = TRUE)
+
+# GSEA leading-edge genes (built here, used in plots chunk)
+if (nrow(as.data.frame(gsea_go)) > 0) {
+  top_gsea <- head(gsea_go@result, N_gsea_running_score)
+  leading_edge_long <- top_gsea %>%
+    dplyr::select(ID, Description, core_enrichment, NES, p.adjust) %>%
+    tidyr::separate_rows(core_enrichment, sep = "/") %>%
+    dplyr::rename(ENTREZID = core_enrichment) %>%
+    dplyr::left_join(tbl[, c("ENTREZID","gene_label","logFC")], by = "ENTREZID")
+  openxlsx::write.xlsx(leading_edge_long,
+                       file = file.path(dir_data, "gsea_leading_edge_genes.xlsx"),
+                       overwrite = TRUE)
+} else {
+  leading_edge_long <- data.frame()
+}
+
+# Pathview guide tables
+if (exists("kegg_guide")) {
+  write.csv(kegg_guide,  file = file.path(dir_data, "kegg_pathview_guide.csv"),  row.names = FALSE)
+  openxlsx::write.xlsx(kegg_guide, file = file.path(dir_data, "kegg_pathview_guide.xlsx"), overwrite = TRUE)
+}
+if (exists("target_pathway_guide")) {
+  write.csv(target_pathway_guide,
+            file = file.path(dir_data, "kegg_pathview_targeted_guide.csv"), row.names = FALSE)
+  openxlsx::write.xlsx(target_pathway_guide,
+                       file = file.path(dir_data, "kegg_pathview_targeted_guide.xlsx"),
+                       overwrite = TRUE)
+}
+if (length(all_pathview_guides) > 0)
+  export_sheets(all_pathview_guides, "kegg_pathview_guides_all.xlsx")
+
+if (is.data.frame(kegg_pathway_gene_checks) && nrow(kegg_pathway_gene_checks) > 0) {
+  write.csv(kegg_pathway_gene_checks,
+            file = file.path(dir_data, "kegg_target_pathway_gene_checks.csv"), row.names = FALSE)
+  openxlsx::write.xlsx(kegg_pathway_gene_checks,
+                       file = file.path(dir_data, "kegg_target_pathway_gene_checks.xlsx"),
+                       overwrite = TRUE)
+}
+
+# Diagnostic barplots (base graphics → data dir)
+if (num_universe > 0) {
+  pdf(file.path(dir_data, "testset_vs_universe_pie.pdf"), 5, 5)
+  pie(c(num_sig, max(0, num_universe - num_sig)),
+      labels = c(sprintf("Test set\n(%d)", num_sig),
+                 sprintf("Universe\n(%d)", max(0, num_universe - num_sig))),
+      col = c("deepskyblue","grey90"),
+      main = "Genes in Test Set vs. Universe")
+  dev.off()
+}
+
+bar_vals <- c(Input = num_input, Mapped = num_mapped,
+              Universe = num_universe, TestSet = num_sig)
+pdf(file.path(dir_data, "gene_counts_barplot.pdf"), 5, 4)
+barplot(bar_vals, main = "Gene Counts at Key Steps", ylab = "Number of genes",
+        col = "darkseagreen", ylim = c(0, max(bar_vals, na.rm = TRUE) * 1.1))
+dev.off()
+```
+
+```{r plots, include=FALSE}
+# =============================================================================
+# PLOTS — volcano, UpSet, dotplots, cnet, emap, GSEA running score,
+#          leading-edge bars, logFC distribution, Sankey
+# =============================================================================
+
+# — Volcano plots ------------------------------------------------------------
+volc <- EnhancedVolcano(tbl, lab = tbl$gene_label,
+                        x = "logFC", y = "padj",
+                        xlab = bquote(~Log[2]~" fold change"),
+                        pCutoff = padj_cutoff, FCcutoff = logFC_cutoff)
+save_plot(volc, "volcano_plot.pdf", 7, 6)
+
+tbl_top <- tbl %>%
+  dplyr::filter(padj < padj_cutoff) %>%
+  dplyr::arrange(padj, dplyr::desc(abs(logFC))) %>%
+  dplyr::slice_head(n = topN_volcano_genes)
+
+volc_focus <- EnhancedVolcano(tbl, lab = tbl$gene_label,
+                              x = "logFC", y = "padj",
+                              pCutoff = padj_cutoff, FCcutoff = logFC_cutoff,
+                              selectLab = tbl_top$gene_label,
+                              labSize = 5, colAlpha = 0.6,
+                              title    = glue::glue("Focused volcano ({topN_volcano_genes} top genes highlighted)"),
+                              subtitle = "Ordered by adjusted P-value then |log2FC|",
+                              caption  = "")
+save_plot(volc_focus, "volcano_top_genes_large.pdf", 9, 8)
+
+# |log2FC| distribution barplot
+pdf(file.path(dir_plots, "logFC_bins_barplot.pdf"), 6, 4)
+barplot(
+  table(cut(abs(tbl$logFC), c(0,1,2,4,8,Inf),
+            labels = c("<1","1-2","2-4","4-8",">8"))),
+  main = "Distribution of |log2FC|", ylab = "Gene count", xlab = "|log2FC| bin")
+dev.off()
+
+# — UpSet plots --------------------------------------------------------------
+get_desc <- function(obj) {
+  if (is.null(obj)) return(character(0))
+  df <- as.data.frame(obj)
+  if (!"Description" %in% names(df)) return(character(0))
+  na.omit(unique(df$Description))
+}
+pretty_names <- c(GO_BP_ORA = "GO-BP ORA", KEGG_ORA = "KEGG ORA",
+                  Reactome_ORA = "Reactome ORA",
+                  GO_BP_GSEA = "GO-BP GSEA", GO_MF_GSEA = "GO-MF GSEA")
+terms_all <- Filter(length, list(
+  GO_BP_ORA    = get_desc(ego),
+  KEGG_ORA     = get_desc(ekegg),
+  Reactome_ORA = get_desc(ereact),
+  GO_BP_GSEA   = get_desc(gsea_go),
+  GO_MF_GSEA   = get_desc(gsea_go_MF)))
+names(terms_all) <- pretty_names[names(terms_all)]
+
+if (length(terms_all) >= 2) {
+  make_upset(terms_all, "full")
+} else {
+  message("Insufficient sets for full UpSet plot.")
+}
+
+terms_neural <- Filter(length, lapply(terms_all, function(v)
+  v[grepl(neural_pattern, v, ignore.case = TRUE)]))
+if (length(terms_neural) >= 2) {
+  make_upset(terms_neural, "neural")
+} else {
+  message("Insufficient neural sets for UpSet plot.")
+}
+
+# — Dotplots -----------------------------------------------------------------
+make_dot(ego,        "GO_ORA",       "GO BP ORA")
+make_dot(ego_MF,     "GO_MF_ORA",    "GO MF ORA")
+make_dot(ekegg,      "KEGG_ORA",     "KEGG ORA")
+make_dot(ereact,     "Reactome_ORA", "Reactome ORA")
+make_dot(gsea_go,    "GO_GSEA",      "GO BP GSEA (preranked)")
+make_dot(gsea_go_MF, "GO_MF_GSEA",   "GO MF GSEA (preranked)")
+
+# — cnetplots ----------------------------------------------------------------
+if (nrow(as.data.frame(ego)) > 0)
+  save_plot(cnetplot(ego, showCategory = 10, node_label = "all"),
+            "cnetplot_GO_ORA.pdf", 9, 8)
+
+enrich_list <- list(GO_ORA = ego, KEGG_ORA = ekegg,
+                    Reactome_ORA = ereact, GO_GSEA = gsea_go)
+for (stub in names(enrich_list)) {
+  res <- enrich_list[[stub]]; df <- as.data.frame(res)
+  if (nrow(df) == 0) next
+  nCat <- min(10, nrow(df))
+  p <- cnetplot(res, showCategory = nCat, foldChange = fc_vec, node_label = "all") +
+    ggplot2::ggtitle(glue::glue("{stub}: cnetplot (top {nCat} terms)"))
+  save_plot(p, sprintf("cnetplot_%s.pdf", stub), 9, 8)
+}
+
+# — emapplot -----------------------------------------------------------------
+if (nrow(as.data.frame(ego)) > 0) {
+  ego_sim <- pairwise_termsim(ego)
+  save_plot(enrichplot::emapplot(ego_sim, showCategory = 30), "emapplot_GO_ORA.pdf", 9, 7)
+}
+
+# — GSEA running score -------------------------------------------------------
+if (nrow(as.data.frame(gsea_go)) > 0) {
+  pdf(file.path(dir_plots, "gsea_running_score.pdf"), 9, 6)
+  for (id in head(gsea_go@result$ID, N_gsea_running_score))
+    print(enrichplot::gseaplot2(gsea_go, geneSetID = id))
+  dev.off()
+}
+
+# — Leading-edge bar charts --------------------------------------------------
+if (nrow(leading_edge_long) > 0) {
+  for (term in unique(leading_edge_long$ID)) {
+    le_term <- leading_edge_long %>% dplyr::filter(ID == term, !is.na(logFC))
+    if (nrow(le_term) == 0) next
+    topN_le <- le_term %>% dplyr::arrange(dplyr::desc(abs(logFC))) %>%
+      dplyr::slice_head(n = N_leading_edge_top)
+    p <- ggplot(topN_le, aes(x = reorder(gene_label, logFC), y = logFC, fill = logFC)) +
+      geom_col() + coord_flip() +
+      labs(title = glue::glue("Leading-edge genes: {unique(topN_le$Description)}"),
+           x = "Gene symbol", y = "log2 fold change") +
+      theme_bw(base_size = 11) +
+      scale_fill_gradient2(low = "royalblue", mid = "white", high = "firebrick")
+    save_plot(p, sprintf("gsea_leading_edge_%s.pdf", term), 8, 5)
+  }
+}
+
+# — Sankey: genes → KEGG pathways → class -----------------------------------
+if (nrow(ekegg_df) > 0) {
+  kegg_top    <- ekegg_df %>% dplyr::slice_head(n = N_sankey_paths)
+  gene_lookup <- tbl %>% dplyr::select(ENTREZID, gene_label)
+
+  links_g2p <- kegg_top %>%
+    dplyr::select(Description, geneID) %>%
+    tidyr::separate_rows(geneID, sep = "/") %>%
+    dplyr::left_join(gene_lookup, by = c("geneID" = "ENTREZID")) %>%
+    dplyr::transmute(source = gene_label, target = Description, value = 1L) %>%
+    dplyr::filter(!is.na(source))
+
+  if (!"Class" %in% names(kegg_top)) kegg_top$Class <- "Unknown class"
+  links_p2c <- kegg_top %>%
+    dplyr::transmute(source = Description, target = Class, value = Count)
+
+  links_all <- dplyr::bind_rows(links_g2p, links_p2c)
+  nodes <- data.frame(name = unique(c(links_all$source, links_all$target)))
+  links_all$source <- match(links_all$source, nodes$name) - 1L
+  links_all$target <- match(links_all$target, nodes$name) - 1L
+
+  sankey <- networkD3::sankeyNetwork(
+    Links = links_all, Nodes = nodes,
+    Source = "source", Target = "target", Value = "value",
+    NodeID = "name", fontSize = 12, nodeWidth = 22, sinksRight = FALSE)
+  out_file <- file.path(dir_interactive, "sankey_genes_kegg.html")
+  htmlwidgets::saveWidget(sankey, file = out_file, selfcontained = TRUE)
+  message("Sankey diagram written: ", out_file)
+}
+
+# — logFC distribution panels ------------------------------------------------
+neural_gene_tbl <- data.frame()   # populated in neural chunk; placeholder here
+plot_df <- dplyr::bind_rows(
+  tbl          %>% dplyr::transmute(logFC, Category = "All mapped"),
+  tbl_sig_base %>% dplyr::transmute(logFC, Category = "Significant"))
+plot_df$Category <- factor(plot_df$Category, levels = c("All mapped","Significant","Neural"))
+
+p_lfc <- ggplot(plot_df, aes(x = logFC)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "grey75", colour = "black") +
+  geom_density(colour = "navy", linewidth = 0.9, alpha = 0.6) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~ Category, ncol = 1, scales = "free_y") +
+  labs(title = "Distribution of log2 fold changes",
+       x = "log2 fold change", y = "Density") +
+  theme(plot.title = element_text(hjust = 0.5))
+save_plot(p_lfc, "logFC_distribution_panels.pdf", 7, 9)
+```
+
+```{r neural, include=FALSE}
+# =============================================================================
+# NEURAL SUBSET
+# =============================================================================
+
+neural_ora     <- filter_neural(ego)
+neural_gsea    <- filter_neural(gsea_go)
+neural_ora_MF  <- filter_neural(ego_MF)
+neural_gsea_MF <- filter_neural(gsea_go_MF)
+
+# Dotplots for neural subsets
+if (nrow(neural_ora)  > 0) make_dot(neural_ora,  "GO_ORA_NEURAL",  "Neural GO-BP ORA (subset)",
+                                    subdir = dir_neural_plots)
+if (nrow(neural_gsea) > 0) make_dot(neural_gsea, "GO_GSEA_NEURAL", "Neural GO-BP GSEA (subset)",
+                                    subdir = dir_neural_plots)
+
+# Ridgeplot for neural GSEA BP
+if (nrow(neural_gsea) >= 3 && "ID" %in% names(neural_gsea)) {
+  neural_rows <- which(gsea_go@result$ID %in% na.omit(neural_gsea$ID))
+  if (length(neural_rows) >= 3) {
+    N_ridge <- min(length(neural_rows), N_neural_ridgeplot)
+    gsea_go_neural <- gsea_go
+    gsea_go_neural@result <- gsea_go@result[neural_rows, , drop = FALSE]
+    pdf(file.path(dir_neural_plots, "ridgeplot_GO_GSEA_NEURAL.pdf"), 7, 0.5 * N_ridge + 2)
+    print(enrichplot::ridgeplot(gsea_go_neural, showCategory = N_ridge) +
+            labs(x = "Enrichment score (NES)", y = NULL) +
+            theme(axis.text.y = element_text(size = 10)))
+    dev.off()
+  }
+}
+
+# cnetplot for neural ORA
+if (nrow(neural_ora) > 1) {
+  neural_ids <- unique(na.omit(neural_ora$ID))
+  neural_ego <- ego
+  neural_ego@result <- dplyr::filter(ego@result, ID %in% neural_ids)
+  p <- cnetplot(neural_ego, showCategory = min(15, length(neural_ids)),
+                foldChange = fc_vec, node_label = "all")
+  save_plot(p, "cnetplot_GO_ORA_NEURAL.pdf", 10, 8, subdir = dir_neural_plots)
+}
+
+# Heatmap of neural gene logFC
+if (nrow(neural_ora) > 0 || nrow(neural_gsea) > 0) {
+  neural_gene_vec <- unique(unlist(strsplit(
+    c(if ("Genes" %in% names(neural_ora)) neural_ora$Genes else character(0),
+      if ("core_enrichment" %in% names(neural_gsea)) neural_gsea$core_enrichment
+      else character(0)), "/")))
+  neural_gene_tbl <- tbl %>% dplyr::filter(ENTREZID %in% neural_gene_vec)
+  if (nrow(neural_gene_tbl) > 0) {
+    mat <- matrix(neural_gene_tbl$logFC, nrow = 1,
+                  dimnames = list(NULL, neural_gene_tbl$gene_label))
+    col_fun <- circlize::colorRamp2(
+      c(-max(abs(mat)), 0, max(abs(mat))),
+      c("royalblue","white","firebrick"))
+    pdf(file.path(dir_neural_plots, "heatmap_neural_gene_logFC.pdf"), 8, 2.5)
+    ComplexHeatmap::Heatmap(mat, name = "log2FC", col = col_fun,
+                            cluster_columns = TRUE, show_row_names = FALSE,
+                            column_names_gp = grid::gpar(fontsize = 7))
+    dev.off()
+  }
+}
+
+# Neural summary export
+neural_summary <- data.frame(
+  Set        = c("Neural ORA (BP)","Neural GSEA (BP)","Neural ORA (MF)","Neural GSEA (MF)"),
+  N_terms    = c(nrow(neural_ora), nrow(neural_gsea), nrow(neural_ora_MF), nrow(neural_gsea_MF)),
+  Top_BP_ORA  = c(if (nrow(neural_ora)  > 0) neural_ora$Description[1]  else NA, NA, NA, NA),
+  Top_BP_GSEA = c(NA, if (nrow(neural_gsea) > 0) neural_gsea$Description[1] else NA, NA, NA),
+  Top_MF_ORA  = c(NA, NA, if (nrow(neural_ora_MF)  > 0) neural_ora_MF$Description[1]  else NA, NA),
+  Top_MF_GSEA = c(NA, NA, NA, if (nrow(neural_gsea_MF) > 0) neural_gsea_MF$Description[1] else NA))
+
+export_sheets(
+  list(Neural_GO_BP_ORA  = neural_ora,
+       Neural_GO_BP_GSEA = neural_gsea,
+       Neural_GO_MF_ORA  = neural_ora_MF,
+       Neural_GO_MF_GSEA = neural_gsea_MF,
+       Neural_Summary    = neural_summary),
+  "enrichment_neural_only.xlsx")
+```
+
+```{r session, include=FALSE}
+# =============================================================================
+# SESSION — save R objects + sessionInfo
+# =============================================================================
+
+saveRDS(
+  list(ego        = ego,
+       ekegg      = ekegg,
+       ereact     = ereact,
+       gsea_go    = gsea_go,
+       gsea_go_MF = gsea_go_MF,
+       gsea_kegg  = gsea_kegg,
+       fc_vec     = fc_vec),
+  file.path(dir_data, "enrichment_objects.rds"))
+
+writeLines(capture.output(sessionInfo()),
+           file.path(dir_data, "sessionInfo.txt"))
+
+cat("\n  All done! See 'output/' for tables, figures, SVGs, and widgets.\n")
+cat(sprintf("  Subdirectories: plots/, plots/dotplots/, plots/neural/, data/, pathview/, interactive/\n"))
+```

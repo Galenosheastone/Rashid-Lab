@@ -1,0 +1,6 @@
+file
+output/pathways/figures/Sacral_vs_Free_fgsea_dotplot.png
+output/pathways/pathways_manifest.tsv
+output/pathways/results/gsea/DESeq2_GRCg7b_Free_vs_Pygostyle_by_ENS_fgsea.tsv
+output/pathways/results/gsea/Sacral_vs_Free_fgsea.tsv
+output/pathways/results/gsea/Sacral_vs_Free_leading_edge.tsv

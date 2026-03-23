@@ -1,0 +1,4 @@
+status: completed
+messages:
+- gseGO failed: invalid class “gseaResult” object: invalid object for slot "geneList" in class "gseaResult": got class "array", should be or extend class "numeric"
+- gseKEGG failed: cannot open the connection to 'https://rest.kegg.jp/link/gga/pathway'
