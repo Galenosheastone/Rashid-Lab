@@ -1,9 +1,0 @@
-symbol	label	module
-NLRP3	NLRP3↑	Priming targets
-IL1B	pro-IL-1β	Priming targets
-NLRP3	NLRP3	Sensor assembly
-PYCARD	ASC	Sensor assembly
-AIM2	AIM2	Sensor assembly
-NLRC4	NLRC4	Sensor assembly
-IL1B	IL-1β	Outputs
-GSDMD	GSDMD	Outputs
