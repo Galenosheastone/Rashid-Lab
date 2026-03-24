@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sacral vs Free 2023 — 3D Pathway Network</title>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1"
+  onerror="document.getElementById('loading-msg').textContent='ERROR: Failed to load 3d-force-graph from CDN. Check internet connection.';"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a1a;
+    color: #e0e0f0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+  #title-bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 38px;
+    background: rgba(10,10,40,0.95);
+    border-bottom: 1px solid rgba(100,100,200,0.3);
+    display: flex; align-items: center; padding: 0 16px; z-index: 100; gap: 16px;
+  }
+  #title-bar h1 { font-size: 14px; font-weight: 600; color: #c0c8ff; white-space: nowrap; }
+  #title-bar .stats { font-size: 11px; color: #888; white-space: nowrap; }
+  #layout { display: flex; position: fixed; top: 38px; left: 0; right: 0; bottom: 0; }
+  #control-panel {
+    width: 240px; min-width: 240px;
+    background: rgba(14,14,35,0.92);
+    border-right: 1px solid rgba(100,100,200,0.2);
+    overflow-y: auto; padding: 10px; z-index: 50;
+    scrollbar-width: thin; scrollbar-color: #333 transparent;
+  }
+  #graph-container { flex: 1; position: relative; overflow: hidden; }
+  .panel-section { margin-bottom: 14px; }
+  .panel-section h3 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #7080c0;
+    margin-bottom: 7px; border-bottom: 1px solid rgba(100,100,200,0.2); padding-bottom: 4px;
+  }
+  .check-row {
+    display: flex; align-items: center; gap: 7px; margin-bottom: 5px; cursor: pointer;
+  }
+  .check-row:hover { background: rgba(100,120,255,0.08); border-radius: 3px; }
+  .check-row input[type=checkbox] { cursor: pointer; accent-color: #6a8aff; }
+  .pathway-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .check-label { font-size: 12px; color: #ccc; line-height: 1.3; }
+  #search-box {
+    width: 100%;
+    background: rgba(30,30,60,0.8);
+    border: 1px solid rgba(100,100,200,0.3);
+    border-radius: 4px; color: #e0e0f0; padding: 5px 8px; font-size: 12px;
+    outline: none; margin-bottom: 6px;
+  }
+  #search-box:focus { border-color: rgba(100,150,255,0.6); }
+  #search-results { font-size: 11px; color: #888; min-height: 16px; }
+  .btn {
+    display: block; width: 100%; margin-bottom: 5px; padding: 5px 8px;
+    background: rgba(40,50,120,0.7); border: 1px solid rgba(100,120,200,0.3);
+    border-radius: 4px; color: #c0ccff; font-size: 11px; cursor: pointer;
+    text-align: left; transition: background 0.15s;
+  }
+  .btn:hover { background: rgba(60,80,160,0.8); }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .kbd {
+    display: inline-block; background: rgba(60,60,100,0.6);
+    border: 1px solid rgba(100,100,180,0.4); border-radius: 3px;
+    padding: 1px 5px; font-size: 10px; font-family: monospace; color: #aabf;
+  }
+  #tooltip {
+    position: fixed;
+    background: rgba(10,10,30,0.95);
+    border: 1px solid rgba(100,120,255,0.4);
+    border-radius: 6px; padding: 10px 13px;
+    pointer-events: none; z-index: 200; display: none;
+    min-width: 200px; max-width: 280px; font-size: 12px; line-height: 1.6;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  }
+  #tooltip .tt-gene { font-size: 14px; font-weight: 700; color: #c8d8ff; margin-bottom: 6px; }
+  #tooltip .tt-row { display: flex; gap: 8px; }
+  #tooltip .tt-key { color: #8899cc; min-width: 90px; }
+  #tooltip .tt-val { color: #dde; }
+  #tooltip .tt-sig { color: #ff9966; font-weight: 600; }
+  #tooltip .tt-up { color: #ff8888; }
+  #tooltip .tt-down { color: #88aaff; }
+  #detail-panel {
+    position: fixed; right: 0; top: 38px; bottom: 0; width: 280px;
+    background: rgba(10,10,30,0.96);
+    border-left: 1px solid rgba(100,100,200,0.25);
+    padding: 12px; overflow-y: auto; z-index: 80; display: none;
+    font-size: 12px; line-height: 1.6;
+  }
+  #detail-panel h2 { font-size: 15px; color: #c8d8ff; margin-bottom: 10px; }
+  #detail-panel .dp-key { color: #8899cc; }
+  #detail-panel .dp-val { color: #dde; }
+  #detail-panel .dp-section {
+    margin-top: 10px; color: #8899cc; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 1px;
+    border-bottom: 1px solid rgba(100,100,200,0.2); padding-bottom: 3px; margin-bottom: 6px;
+  }
+  #detail-panel .neighbor-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  #detail-panel .note-item {
+    font-size: 11px; color: #aaa; margin-bottom: 4px;
+    border-left: 2px solid rgba(100,100,200,0.3); padding-left: 6px;
+  }
+  #close-detail { float: right; cursor: pointer; color: #888; font-size: 16px; line-height: 1; }
+  #legend {
+    position: fixed; bottom: 16px; right: 16px;
+    background: rgba(12,12,32,0.90);
+    border: 1px solid rgba(100,100,200,0.25);
+    border-radius: 8px; padding: 10px 14px; z-index: 60; min-width: 170px; font-size: 11px;
+  }
+  #legend-header {
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none;
+  }
+  #legend h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+    color: #7080c0; margin: 0;
+  }
+  #legend-toggle-icon {
+    font-size: 12px; color: #7080c0; line-height: 1; margin-left: 8px;
+  }
+  #legend-body { margin-top: 8px; }
+  #legend-body.collapsed { display: none; }
+  .lfc-bar {
+    width: 140px; height: 12px;
+    background: linear-gradient(to right, #2166ac, #f7f7f7, #b2182b);
+    border-radius: 3px; margin: 4px 0 2px;
+  }
+  .lfc-labels { display: flex; justify-content: space-between; color: #888; font-size: 10px; }
+  .legend-row { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+  #loading {
+    position: fixed; inset: 0; background: #0a0a1a;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; z-index: 999; gap: 16px;
+  }
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid rgba(100,130,255,0.2);
+    border-top-color: #6a8aff; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading p { color: #888; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p id="loading-msg">Initializing 3D network...</p>
+</div>
+
+<div id="title-bar">
+  <h1>Sacral vs Free 2023 — 3D Pathway Network</h1>
+  <span class="stats" id="graph-stats"></span>
+  <span class="stats">Drag to rotate &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Right-drag to pan</span>
+</div>
+
+<div id="layout">
+  <div id="control-panel">
+    <div class="panel-section">
+      <h3>Search</h3>
+      <input id="search-box" type="text" placeholder="Gene symbol or label…" autocomplete="off">
+      <div id="search-results"></div>
+    </div>
+    <div class="panel-section">
+      <h3>Pathways</h3>
+      <div id="pathway-checkboxes"></div>
+      <button class="btn" id="btn-show-all" style="margin-top:4px;">Show All</button>
+      <button class="btn" id="btn-isolate-active" style="color:#ffcc66;">Isolate checked ↑</button>
+    </div>
+    <div class="panel-section">
+      <h3>Filters</h3>
+      <div class="check-row">
+        <input type="checkbox" id="filter-significant">
+        <label for="filter-significant" class="check-label">Significant only (padj &lt; 0.05)</label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="filter-hubs">
+        <label for="filter-hubs" class="check-label">Hub nodes only (multi-pathway)</label>
+      </div>
+    </div>
+    <div class="panel-section">
+      <h3>Display</h3>
+      <div class="check-row">
+        <input type="checkbox" id="toggle-labels" checked>
+        <label for="toggle-labels" class="check-label">Show labels <span class="kbd">L</span></label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="toggle-arrows" checked>
+        <label for="toggle-arrows" class="check-label">Show arrows</label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="toggle-light">
+        <label for="toggle-light" class="check-label">Light background</label>
+      </div>
+    </div>
+    <div class="panel-section">
+      <h3>Camera &nbsp;<span class="kbd">R</span>=reset &nbsp;<span class="kbd">1-7</span>=layer</h3>
+      <button class="btn" id="btn-reset-camera">Reset Camera</button>
+      <button class="btn" id="btn-reheat">Reheat Simulation <span class="kbd">Space</span></button>
+    </div>
+    <div class="panel-section">
+      <h3>Export</h3>
+      <button class="btn" id="btn-screenshot">Screenshot PNG</button>
+      <button class="btn" id="btn-export-csv">Export Node CSV</button>
+    </div>
+    <div class="panel-section" style="color:#555;font-size:10px;line-height:1.7;">
+      Organism: <em style="color:#666">Gallus gallus</em><br>
+      p-cutoff: 0.05<br>
+      Double-click node to reset view<br>
+      <span class="kbd">H</span> hub-only &nbsp;<span class="kbd">L</span> labels &nbsp;<span class="kbd">Space</span> pause
+    </div>
+  </div>
+  <div id="graph-container"></div>
+</div>
+
+<div id="tooltip"></div>
+
+<div id="detail-panel">
+  <span id="close-detail">✕</span>
+  <div id="detail-content"></div>
+</div>
+
+<div id="legend">
+  <div id="legend-header" onclick="toggleLegend()">
+    <h4>Legend</h4>
+    <span id="legend-toggle-icon">▲</span>
+  </div>
+  <div id="legend-body">
+    <div style="margin-top:8px;color:#7080c0;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">log2 Fold-Change</div>
+    <div class="lfc-bar"></div>
+    <div class="lfc-labels"><span>−3</span><span>0</span><span>+3</span></div>
+    <div style="margin-top:10px;">
+      <div class="legend-row">
+        <div style="width:18px;height:18px;border-radius:50%;background:#aaa;border:2px solid #fff;flex-shrink:0;"></div>
+        <span>Significant (padj &lt; 0.05)</span>
+      </div>
+      <div class="legend-row">
+        <div style="width:11px;height:11px;border-radius:50%;background:#666;flex-shrink:0;"></div>
+        <span>Not significant / padj NA</span>
+      </div>
+      <div class="legend-row">
+        <div style="width:7px;height:7px;border-radius:50%;background:#333;flex-shrink:0;"></div>
+        <span>Missing gene</span>
+      </div>
+      <div class="legend-row">
+        <div style="width:14px;height:14px;border-radius:50%;background:#aaa;border:2px solid #ffdd88;flex-shrink:0;"></div>
+        <span>Hub node (multi-pathway)</span>
+      </div>
+    </div>
+    <div style="margin-top:10px;" id="legend-pathways"></div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// Embedded Data
+// ============================================================
+const DATA = {"title": "Sacral vs Free 2023 — 3D Pathway Network", "p_cutoff": 0.05, "max_lfc": 6.52, "pathways": {"cgas_sting": {"display_name": "cGAS-STING / Type I IFN Signaling", "color": "#6A5ACD", "validation_notes": ["STING axis: STING1 ER-to-Golgi trafficking by confocal.", "IFN output: IFNB1 / ISGs by qPCR or RNAscope.", "NF-kB arm: p65 nuclear translocation by IF.", "Chemokines: CXCL10/CCL5 by ELISA on conditioned media."]}, "apoptosis": {"display_name": "Apoptosis", "color": "#A33A3A", "validation_notes": ["Cleaved CASP3 / CASP8 by Western blot or IHC.", "TUNEL staining for DNA fragmentation.", "Cytochrome c release by fractionation (mitochondrial arm).", "Annexin V / PI flow cytometry for apoptosis vs necrosis."]}, "necroptosis": {"display_name": "Necroptosis", "color": "#2F7F56", "validation_notes": ["*RIPK3: GRCg7b locus (GeneID 415708) is RIPK2-like by BLASTp. True RIPK3 is likely absent across Aves.", "pMLKL by Western blot (note: chicken MLKL may be orphaned pseudokinase).", "RIPK1/RIPK3 necrosome complex by co-IP.", "MLKL membrane translocation by fractionation or confocal.", "Distinguish from apoptosis: CASP8 inhibition should potentiate, not block."]}, "inflammasome": {"display_name": "Inflammasome (NLRP3 Canonical)", "color": "#FF8C00", "validation_notes": ["CASP1 cleavage (p20 fragment) by Western blot.", "ASC speck formation by immunofluorescence.", "IL-1β / IL-18 by ELISA on conditioned media.", "GSDMD N-terminal fragment by WB (note: chicken GSDMD orthology uncertain).", "LDH release assay for pyroptotic cell death.", "NLRC4 likely absent in chicken — informative if 'Missing gene'."]}, "osteoclast": {"display_name": "Osteoclast Differentiation (RANKL-RANK)", "color": "#1F4E79", "validation_notes": ["TRAP staining (ACP5) on tissue sections or cytospins.", "Cathepsin K (CTSK) activity assay or IHC.", "Pit/dentine resorption assay for functional osteoclast activity.", "NFATc1 nuclear localization by IF.", "OPG (TNFRSF11B) shown as inhibitor: OPG → RANKL edge is inhibitory (decoy receptor).", "DC-STAMP and CALCR may have limited chicken annotation."]}, "osteoblast": {"display_name": "Osteoblast Differentiation (BMP/Wnt)", "color": "#1E90FF", "validation_notes": ["Alizarin red S staining for matrix mineralization.", "ALP (ALPL) activity assay — early OB marker.", "Osteocalcin (BGLAP) ELISA on conditioned media — late OB marker.", "von Kossa staining for calcium phosphate deposits.", "RUNX2 and Osterix nuclear localization by IF.", "SOST/DKK1 shown as Wnt pathway inhibitors (edges to LRP5/6).", "SOST and DKK1 may have limited chicken annotation — informative if 'Missing gene'."]}, "oxysterol": {"display_name": "Oxysterol Signaling in Bone Fusion", "color": "#8B6914", "validation_notes": ["CH25H is an ISG: bridges cGAS-STING/IFN module to oxysterol production. Expect co-expression with ISG signature.", "GPR183/EBI2: oxysterol-guided OCP chemotaxis to bone surfaces (Nevius et al. 2015 J Exp Med).", "Osteogenic arm: oxysterol → SMO binding is allosteric, bypassing PTCH1. Blocked by cyclopamine.", "27-OHC → LXRα → RANKL: macrophage-derived oxysterol promotes osteoclastogenesis (Nelson et al. 2011).", "25-HC dose paradox: anti-inflammatory at nM (SREBP2 repression) vs pro-inflammatory at µM (NLRP3 activation).", "SULT2B1: sulfonates oxysterols to inactive forms. Low expression prolongs oxysterol signaling.", "HSD3B7 degrades 7α,25-diHC, shaping the GPR183 chemotactic gradient.", "Non-enzymatic oxysterols (7-KC, 7β-OHC) from ROS/necroptosis are metabolite targets, not gene targets.", "Metabolomics priorities: 25-HC, 7α,25-diHC, 7-KC, 27-OHC (Tier 1 for Free vs Fusing disc comparison).", "Chicken annotation caveat: CH25H is intronless — verify Ensembl ID in GRCg7b (may be LOC identifier).", "GPR183 annotation: verify in GRCg7b; may be listed as EBI2."]}}, "nodes": [{"id": "DDX41", "label": "DDX41", "pathways": ["cgas_sting"], "modules": ["Sensors"], "compartments": ["Cytosol"], "x": 0.0, "y": 252.0, "z": 0.0, "x_initial": 0.0, "y_initial": 252.0, "z_target": 0.0, "log2FC": -0.173704493801283, "padj": 0.298916962991534, "node_status": "Present; not significant", "matched_as": "DDX41", "is_hub": false}, {"id": "IFI16", "label": "IFI16", "pathways": ["cgas_sting"], "modules": ["Sensors"], "compartments": ["Cytosol"], "x": 0.0, "y": 198.0, "z": 0.0, "x_initial": 0.0, "y_initial": 198.0, "z_target": 0.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "MB21D1", "label": "cGAS", "pathways": ["cgas_sting"], "modules": ["Sensors"], "compartments": ["Cytosol"], "x": 0.0, "y": 144.0, "z": 0.0, "x_initial": 0.0, "y_initial": 144.0, "z_target": 0.0, "log2FC": 0.747166054905138, "padj": 5.11951413769527e-06, "node_status": "Present; significant", "matched_as": "MB21D1", "is_hub": false}, {"id": "ZBP1", "label": "ZBP1", "pathways": ["cgas_sting", "necroptosis"], "modules": ["Sensors", "Inputs"], "compartments": ["Cytosol"], "x": 144.0, "y": 81.0, "z": 150.0, "x_initial": 144.0, "y_initial": 81.0, "z_target": 150.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": true}, {"id": "STING1", "label": "STING1", "pathways": ["cgas_sting"], "modules": ["STING"], "compartments": ["ER/Golgi"], "x": 90.0, "y": 162.0, "z": 0.0, "x_initial": 90.0, "y_initial": 162.0, "z_target": 0.0, "log2FC": 0.907281811886253, "padj": 0.000173870295703416, "node_status": "Present; significant", "matched_as": "TMEM173", "is_hub": false}, {"id": "TRAF3", "label": "TRAF3", "pathways": ["cgas_sting"], "modules": ["Trafficking"], "compartments": ["Cytosol"], "x": 180.0, "y": 243.0, "z": 0.0, "x_initial": 180.0, "y_initial": 243.0, "z_target": 0.0, "log2FC": 0.535077983861574, "padj": 0.03044263758762, "node_status": "Present; significant", "matched_as": "TRAF3", "is_hub": false}, {"id": "TRAF6", "label": "TRAF6", "pathways": ["cgas_sting", "inflammasome", "osteoclast"], "modules": ["Trafficking", "Priming", "Signaling cascade"], "compartments": ["Cytosol"], "x": 216.0, "y": 123.0, "z": 350.0, "x_initial": 216.0, "y_initial": 123.0, "z_target": 350.0, "log2FC": 0.288952501553179, "padj": 0.161897883318631, "node_status": "Present; not significant", "matched_as": "TRAF6", "is_hub": true}, {"id": "TBK1", "label": "TBK1", "pathways": ["cgas_sting"], "modules": ["Kinases"], "compartments": ["Cytosol"], "x": 180.0, "y": 189.0, "z": 0.0, "x_initial": 180.0, "y_initial": 189.0, "z_target": 0.0, "log2FC": -0.105385533564654, "padj": 0.687662914253715, "node_status": "Present; not significant", "matched_as": "TBK1", "is_hub": false}, {"id": "IKBKB", "label": "IKKβ", "pathways": ["cgas_sting"], "modules": ["Kinases"], "compartments": ["Cytosol"], "x": 180.0, "y": 36.0, "z": 0.0, "x_initial": 180.0, "y_initial": 36.0, "z_target": 0.0, "log2FC": -0.12709821079716, "padj": 0.478257098897909, "node_status": "Present; not significant", "matched_as": "IKBKB", "is_hub": false}, {"id": "IKBKG", "label": "NEMO", "pathways": ["cgas_sting"], "modules": ["Kinases"], "compartments": ["Cytosol"], "x": 180.0, "y": -18.0, "z": 0.0, "x_initial": 180.0, "y_initial": -18.0, "z_target": 0.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "CHUK", "label": "IKKα", "pathways": ["cgas_sting"], "modules": ["Kinases"], "compartments": ["Cytosol"], "x": 180.0, "y": -72.0, "z": 0.0, "x_initial": 180.0, "y_initial": -72.0, "z_target": 0.0, "log2FC": 0.900080310948275, "padj": 1.99324159761982e-08, "node_status": "Present; significant", "matched_as": "CHUK", "is_hub": false}, {"id": "IRF7", "label": "IRF7", "pathways": ["cgas_sting"], "modules": ["TFs"], "compartments": ["Nucleus"], "x": 270.0, "y": 261.0, "z": 0.0, "x_initial": 270.0, "y_initial": 261.0, "z_target": 0.0, "log2FC": -1.06823065102569, "padj": 0.000148886682633176, "node_status": "Present; significant", "matched_as": "IRF7", "is_hub": false}, {"id": "IRF3", "label": "IRF3", "pathways": ["cgas_sting"], "modules": ["TFs"], "compartments": ["Nucleus"], "x": 270.0, "y": 198.0, "z": 0.0, "x_initial": 270.0, "y_initial": 198.0, "z_target": 0.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "NFKB1", "label": "NF-κB", "pathways": ["cgas_sting", "inflammasome", "osteoclast"], "modules": ["TFs", "Priming", "Signaling cascade"], "compartments": ["Nucleus"], "x": 336.0, "y": 60.0, "z": 350.0, "x_initial": 336.0, "y_initial": 60.0, "z_target": 350.0, "log2FC": 0.610106933530188, "padj": 1.06775327346124e-05, "node_status": "Present; significant", "matched_as": "NFKB1", "is_hub": true}, {"id": "RELA", "label": "RelA", "pathways": ["cgas_sting", "inflammasome"], "modules": ["TFs", "Priming"], "compartments": ["Nucleus"], "x": 315.0, "y": 9.0, "z": 225.0, "x_initial": 315.0, "y_initial": 9.0, "z_target": 225.0, "log2FC": 0.254400649593365, "padj": 0.202068083504206, "node_status": "Present; not significant", "matched_as": "RELA", "is_hub": true}, {"id": "IFNB1", "label": "IFNβ", "pathways": ["cgas_sting", "oxysterol"], "modules": ["IFN", "IFN input"], "compartments": ["Secreted"], "x": 180.0, "y": 283.5, "z": 450.0, "x_initial": 180.0, "y_initial": 283.5, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": true}, {"id": "IFNAR1", "label": "IFNAR1", "pathways": ["cgas_sting", "oxysterol"], "modules": ["IFNAR/JAK-STAT", "IFN input"], "compartments": ["Plasma membrane"], "x": 270.0, "y": 306.0, "z": 450.0, "x_initial": 270.0, "y_initial": 306.0, "z_target": 450.0, "log2FC": -0.894315640298338, "padj": 0.000703998559880375, "node_status": "Present; significant", "matched_as": "IFNAR1", "is_hub": true}, {"id": "IFNAR2", "label": "IFNAR2", "pathways": ["cgas_sting"], "modules": ["IFNAR/JAK-STAT"], "compartments": ["Plasma membrane"], "x": 450.0, "y": 180.0, "z": 0.0, "x_initial": 450.0, "y_initial": 180.0, "z_target": 0.0, "log2FC": -0.215701557652838, "padj": 0.188362727896964, "node_status": "Present; not significant", "matched_as": "IFNAR2", "is_hub": false}, {"id": "JAK1", "label": "JAK1", "pathways": ["cgas_sting"], "modules": ["IFNAR/JAK-STAT"], "compartments": ["Cytosol"], "x": 540.0, "y": 252.0, "z": 0.0, "x_initial": 540.0, "y_initial": 252.0, "z_target": 0.0, "log2FC": -0.351641795919, "padj": 0.0763809362406104, "node_status": "Present; not significant", "matched_as": "JAK1", "is_hub": false}, {"id": "TYK2", "label": "TYK2", "pathways": ["cgas_sting"], "modules": ["IFNAR/JAK-STAT"], "compartments": ["Cytosol"], "x": 540.0, "y": 180.0, "z": 0.0, "x_initial": 540.0, "y_initial": 180.0, "z_target": 0.0, "log2FC": -0.212598596703167, "padj": 0.155330979657732, "node_status": "Present; not significant", "matched_as": "TYK2", "is_hub": false}, {"id": "STAT1", "label": "STAT1", "pathways": ["cgas_sting"], "modules": ["IFNAR/JAK-STAT"], "compartments": ["Nucleus"], "x": 540.0, "y": 297.0, "z": 0.0, "x_initial": 540.0, "y_initial": 297.0, "z_target": 0.0, "log2FC": -0.333381196106721, "padj": 0.00812135773756911, "node_status": "Present; significant", "matched_as": "STAT1", "is_hub": false}, {"id": "STAT2", "label": "STAT2", "pathways": ["cgas_sting"], "modules": ["IFNAR/JAK-STAT"], "compartments": ["Nucleus"], "x": 540.0, "y": 135.0, "z": 0.0, "x_initial": 540.0, "y_initial": 135.0, "z_target": 0.0, "log2FC": -0.141111473617378, "padj": 0.633624101388304, "node_status": "Present; not significant", "matched_as": "STAT2", "is_hub": false}, {"id": "IRF9", "label": "IRF9", "pathways": ["cgas_sting"], "modules": ["IFNAR/JAK-STAT"], "compartments": ["Nucleus"], "x": 540.0, "y": 207.0, "z": 0.0, "x_initial": 540.0, "y_initial": 207.0, "z_target": 0.0, "log2FC": -1.65361249475505, "padj": 0.000112975334400357, "node_status": "Present; significant", "matched_as": "IRF9", "is_hub": false}, {"id": "CXCL10", "label": "CXCL10", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Secreted"], "x": 630.0, "y": 306.0, "z": 0.0, "x_initial": 630.0, "y_initial": 306.0, "z_target": 0.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "CCL5", "label": "CCL5", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Secreted"], "x": 630.0, "y": 252.0, "z": 0.0, "x_initial": 630.0, "y_initial": 252.0, "z_target": 0.0, "log2FC": -2.73948425702566, "padj": 0.000811972133234917, "node_status": "Present; significant", "matched_as": "CCL5", "is_hub": false}, {"id": "ISG15", "label": "ISG15", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Cytosol"], "x": 630.0, "y": 216.0, "z": 0.0, "x_initial": 630.0, "y_initial": 216.0, "z_target": 0.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "MX1", "label": "MX1", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Cytosol"], "x": 630.0, "y": 180.0, "z": 0.0, "x_initial": 630.0, "y_initial": 180.0, "z_target": 0.0, "log2FC": -1.42720844436219, "padj": 0.00530547653933296, "node_status": "Present; significant", "matched_as": "MX1", "is_hub": false}, {"id": "OASL", "label": "OASL", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Cytosol"], "x": 630.0, "y": 144.0, "z": 0.0, "x_initial": 630.0, "y_initial": 144.0, "z_target": 0.0, "log2FC": -1.1088064919645, "padj": 0.00722992926689531, "node_status": "Present; significant", "matched_as": "OASL", "is_hub": false}, {"id": "IFIT5", "label": "IFIT5", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Cytosol"], "x": 630.0, "y": 108.0, "z": 0.0, "x_initial": 630.0, "y_initial": 108.0, "z_target": 0.0, "log2FC": -1.19856292318417, "padj": 0.00304676372720362, "node_status": "Present; significant", "matched_as": "IFIT5", "is_hub": false}, {"id": "RSAD2", "label": "RSAD2", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Cytosol"], "x": 630.0, "y": 72.0, "z": 0.0, "x_initial": 630.0, "y_initial": 72.0, "z_target": 0.0, "log2FC": -0.286912490323127, "padj": 0.584421820136347, "node_status": "Present; not significant", "matched_as": "RSAD2", "is_hub": false}, {"id": "IL6", "label": "IL6", "pathways": ["cgas_sting"], "modules": ["ISGs/Outputs"], "compartments": ["Secreted"], "x": 630.0, "y": 9.0, "z": 0.0, "x_initial": 630.0, "y_initial": 9.0, "z_target": 0.0, "log2FC": 0.328102325149921, "padj": 0.391159794227582, "node_status": "Present; not significant", "matched_as": "IL6", "is_hub": false}, {"id": "TNF", "label": "TNF", "pathways": ["cgas_sting", "apoptosis", "necroptosis"], "modules": ["ISGs/Outputs", "Ligand/Receptor"], "compartments": ["Secreted"], "x": 210.0, "y": -3.0, "z": 150.0, "x_initial": 210.0, "y_initial": -3.0, "z_target": 150.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": true}, {"id": "TNFRSF1A", "label": "TNFRSF1A", "pathways": ["apoptosis", "necroptosis"], "modules": ["Ligand/Receptor"], "compartments": ["Plasma membrane"], "x": 90.0, "y": 18.0, "z": 225.0, "x_initial": 90.0, "y_initial": 18.0, "z_target": 225.0, "log2FC": 0.750361808862701, "padj": 1.26104762481224e-08, "node_status": "Present; significant", "matched_as": "TNFRSF1A", "is_hub": true}, {"id": "TRADD", "label": "TRADD", "pathways": ["apoptosis", "necroptosis"], "modules": ["Adaptor"], "compartments": ["Cytosol"], "x": 180.0, "y": 18.0, "z": 225.0, "x_initial": 180.0, "y_initial": 18.0, "z_target": 225.0, "log2FC": -0.344645436352405, "padj": 0.0254594224501849, "node_status": "Present; significant", "matched_as": "TRADD", "is_hub": true}, {"id": "FADD", "label": "FADD", "pathways": ["apoptosis"], "modules": ["Caspase axis"], "compartments": ["Cytosol"], "x": 270.0, "y": 72.0, "z": 150.0, "x_initial": 270.0, "y_initial": 72.0, "z_target": 150.0, "log2FC": 0.0278074225268045, "padj": 0.894525192042679, "node_status": "Present; not significant", "matched_as": "FADD", "is_hub": false}, {"id": "CASP8", "label": "CASP8", "pathways": ["apoptosis", "necroptosis"], "modules": ["Caspase axis", "Cross-talk"], "compartments": ["Cytosol"], "x": 324.0, "y": 9.0, "z": 225.0, "x_initial": 324.0, "y_initial": 9.0, "z_target": 225.0, "log2FC": -0.658928374766502, "padj": 0.0323770313154309, "node_status": "Present; significant", "matched_as": "CASP8", "is_hub": true}, {"id": "CASP7", "label": "CASP7", "pathways": ["apoptosis"], "modules": ["Executioners"], "compartments": ["Cytosol"], "x": 450.0, "y": 108.0, "z": 150.0, "x_initial": 450.0, "y_initial": 108.0, "z_target": 150.0, "log2FC": -0.572893514404502, "padj": 0.0275938960502035, "node_status": "Present; significant", "matched_as": "CASP7", "is_hub": false}, {"id": "CASP3", "label": "CASP3", "pathways": ["apoptosis"], "modules": ["Executioners"], "compartments": ["Cytosol"], "x": 558.0, "y": 72.0, "z": 150.0, "x_initial": 558.0, "y_initial": 72.0, "z_target": 150.0, "log2FC": -0.337650911672699, "padj": 0.309999088301308, "node_status": "Present; not significant", "matched_as": "CASP3", "is_hub": false}, {"id": "BID", "label": "BID", "pathways": ["apoptosis"], "modules": ["Mitochondrial axis"], "compartments": ["Mitochondria"], "x": 432.0, "y": 0.0, "z": 150.0, "x_initial": 432.0, "y_initial": 0.0, "z_target": 150.0, "log2FC": -1.45296785325133, "padj": 1.11647442331295e-09, "node_status": "Present; significant", "matched_as": "BID", "is_hub": false}, {"id": "BAX", "label": "BAX", "pathways": ["apoptosis"], "modules": ["Mitochondrial axis"], "compartments": ["Mitochondria"], "x": 522.0, "y": -27.0, "z": 150.0, "x_initial": 522.0, "y_initial": -27.0, "z_target": 150.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "CYCS", "label": "CYCS", "pathways": ["apoptosis"], "modules": ["Mitochondrial axis"], "compartments": ["Mitochondria"], "x": 612.0, "y": -27.0, "z": 150.0, "x_initial": 612.0, "y_initial": -27.0, "z_target": 150.0, "log2FC": -0.924693584961354, "padj": 4.37016039908798e-07, "node_status": "Present; significant", "matched_as": "CYCS", "is_hub": false}, {"id": "APAF1", "label": "APAF1", "pathways": ["apoptosis"], "modules": ["Mitochondrial axis"], "compartments": ["Cytosol"], "x": 702.0, "y": -27.0, "z": 150.0, "x_initial": 702.0, "y_initial": -27.0, "z_target": 150.0, "log2FC": -0.739025243641958, "padj": 0.0177573123447454, "node_status": "Present; significant", "matched_as": "APAF1", "is_hub": false}, {"id": "CASP9", "label": "CASP9", "pathways": ["apoptosis"], "modules": ["Mitochondrial axis"], "compartments": ["Cytosol"], "x": 792.0, "y": -27.0, "z": 150.0, "x_initial": 792.0, "y_initial": -27.0, "z_target": 150.0, "log2FC": -0.164989288919988, "padj": 0.500027984415049, "node_status": "Present; not significant", "matched_as": "CASP9", "is_hub": false}, {"id": "RIPK1", "label": "RIPK1", "pathways": ["necroptosis"], "modules": ["Core necroptosis"], "compartments": ["Cytosol"], "x": 288.0, "y": 18.0, "z": 300.0, "x_initial": 288.0, "y_initial": 18.0, "z_target": 300.0, "log2FC": -0.119729479394239, "padj": 0.505904529528451, "node_status": "Present; not significant", "matched_as": "RIPK1", "is_hub": false}, {"id": "RIPK3", "label": "RIPK3*", "pathways": ["necroptosis"], "modules": ["Core necroptosis"], "compartments": ["Cytosol"], "x": 378.0, "y": 18.0, "z": 300.0, "x_initial": 378.0, "y_initial": 18.0, "z_target": 300.0, "log2FC": -3.61082742337914, "padj": 9.47754785868153e-10, "node_status": "Present; significant", "matched_as": "RIPK3", "is_hub": false}, {"id": "MLKL", "label": "MLKL", "pathways": ["necroptosis"], "modules": ["Executioner"], "compartments": ["Plasma membrane"], "x": 468.0, "y": 18.0, "z": 300.0, "x_initial": 468.0, "y_initial": 18.0, "z_target": 300.0, "log2FC": -3.08150810535708, "padj": 0.000188970631287109, "node_status": "Present; significant", "matched_as": "MLKL", "is_hub": false}, {"id": "TLR4", "label": "TLR4", "pathways": ["inflammasome"], "modules": ["Priming"], "compartments": ["Plasma membrane"], "x": 0.0, "y": 90.0, "z": 450.0, "x_initial": 0.0, "y_initial": 90.0, "z_target": 450.0, "log2FC": -3.03932388391917, "padj": 1.1020955286901e-12, "node_status": "Present; significant", "matched_as": "TLR4", "is_hub": false}, {"id": "MYD88", "label": "MYD88", "pathways": ["inflammasome"], "modules": ["Priming"], "compartments": ["Cytosol"], "x": 90.0, "y": 90.0, "z": 450.0, "x_initial": 90.0, "y_initial": 90.0, "z_target": 450.0, "log2FC": -0.0878473959574241, "padj": 0.701076126582733, "node_status": "Present; not significant", "matched_as": "MYD88", "is_hub": false}, {"id": "IRAK4", "label": "IRAK4", "pathways": ["inflammasome"], "modules": ["Priming"], "compartments": ["Cytosol"], "x": 180.0, "y": 90.0, "z": 450.0, "x_initial": 180.0, "y_initial": 90.0, "z_target": 450.0, "log2FC": 0.3391755618127, "padj": 0.0971153558558123, "node_status": "Present; not significant", "matched_as": "IRAK4", "is_hub": false}, {"id": "NLRP3", "label": "NLRP3↑", "pathways": ["inflammasome"], "modules": ["Priming targets", "Sensor assembly"], "compartments": ["Cytosol"], "x": 369.0, "y": 198.0, "z": 450.0, "x_initial": 369.0, "y_initial": 198.0, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "IL1B", "label": "pro-IL-1β", "pathways": ["inflammasome"], "modules": ["Priming targets", "Outputs"], "compartments": ["Cytosol", "Secreted"], "x": 526.5, "y": 180.0, "z": 450.0, "x_initial": 526.5, "y_initial": 180.0, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "NEK7", "label": "NEK7", "pathways": ["inflammasome"], "modules": ["Sensor assembly"], "compartments": ["Cytosol"], "x": 180.0, "y": 270.0, "z": 450.0, "x_initial": 180.0, "y_initial": 270.0, "z_target": 450.0, "log2FC": 0.634577149615381, "padj": 0.00127838679922745, "node_status": "Present; significant", "matched_as": "NEK7", "is_hub": false}, {"id": "TXNIP", "label": "TXNIP", "pathways": ["inflammasome"], "modules": ["Sensor assembly"], "compartments": ["Cytosol"], "x": 180.0, "y": 324.0, "z": 450.0, "x_initial": 180.0, "y_initial": 324.0, "z_target": 450.0, "log2FC": -1.50255364293008, "padj": 2.44134024385852e-12, "node_status": "Present; significant", "matched_as": "TXNIP", "is_hub": false}, {"id": "PYCARD", "label": "ASC", "pathways": ["inflammasome"], "modules": ["Sensor assembly"], "compartments": ["Cytosol"], "x": 360.0, "y": 270.0, "z": 450.0, "x_initial": 360.0, "y_initial": 270.0, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "AIM2", "label": "AIM2", "pathways": ["inflammasome"], "modules": ["Sensor assembly"], "compartments": ["Cytosol"], "x": 270.0, "y": 342.0, "z": 450.0, "x_initial": 270.0, "y_initial": 342.0, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "NLRC4", "label": "NLRC4", "pathways": ["inflammasome"], "modules": ["Sensor assembly"], "compartments": ["Cytosol"], "x": 270.0, "y": 216.0, "z": 450.0, "x_initial": 270.0, "y_initial": 216.0, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "CASP1", "label": "CASP1", "pathways": ["inflammasome"], "modules": ["Effectors"], "compartments": ["Cytosol"], "x": 450.0, "y": 270.0, "z": 450.0, "x_initial": 450.0, "y_initial": 270.0, "z_target": 450.0, "log2FC": -0.137959075367057, "padj": 0.550855665314848, "node_status": "Present; not significant", "matched_as": "CASP1", "is_hub": false}, {"id": "IL18", "label": "IL-18", "pathways": ["inflammasome"], "modules": ["Outputs"], "compartments": ["Secreted"], "x": 585.0, "y": 234.0, "z": 450.0, "x_initial": 585.0, "y_initial": 234.0, "z_target": 450.0, "log2FC": -0.106877091064047, "padj": 0.790642386222625, "node_status": "Present; not significant", "matched_as": "IL18", "is_hub": false}, {"id": "GSDMD", "label": "GSDMD", "pathways": ["inflammasome"], "modules": ["Outputs"], "compartments": ["Plasma membrane"], "x": 585.0, "y": 180.0, "z": 450.0, "x_initial": 585.0, "y_initial": 180.0, "z_target": 450.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "CSF1", "label": "M-CSF", "pathways": ["osteoclast"], "modules": ["Ligand/Receptor"], "compartments": ["Secreted"], "x": 0.0, "y": 0.0, "z": 600.0, "x_initial": 0.0, "y_initial": 0.0, "z_target": 600.0, "log2FC": -1.06005408652475, "padj": 4.95669435452131e-06, "node_status": "Present; significant", "matched_as": "CSF1", "is_hub": false}, {"id": "CSF1R", "label": "CSF1R", "pathways": ["osteoclast"], "modules": ["Ligand/Receptor"], "compartments": ["Plasma membrane"], "x": 90.0, "y": 0.0, "z": 600.0, "x_initial": 90.0, "y_initial": 0.0, "z_target": 600.0, "log2FC": -3.13975642961999, "padj": 1.0993933883265e-23, "node_status": "Present; significant", "matched_as": "CSF1R", "is_hub": false}, {"id": "TNFSF11", "label": "RANKL", "pathways": ["osteoclast", "oxysterol"], "modules": ["Ligand/Receptor", "LXR/Cholesterol"], "compartments": ["Secreted"], "x": 247.5, "y": 67.5, "z": 750.0, "x_initial": 247.5, "y_initial": 67.5, "z_target": 750.0, "log2FC": -0.888126565859417, "padj": 0.0153187713283829, "node_status": "Present; significant", "matched_as": "TNFSF11", "is_hub": true}, {"id": "TNFRSF11A", "label": "RANK", "pathways": ["osteoclast"], "modules": ["Ligand/Receptor"], "compartments": ["Plasma membrane"], "x": 90.0, "y": 180.0, "z": 600.0, "x_initial": 90.0, "y_initial": 180.0, "z_target": 600.0, "log2FC": -1.1361609269956, "padj": 2.97713094840629e-19, "node_status": "Present; significant", "matched_as": "TNFRSF11A", "is_hub": false}, {"id": "TNFRSF11B", "label": "OPG", "pathways": ["osteoclast"], "modules": ["Ligand/Receptor"], "compartments": ["Secreted"], "x": 0.0, "y": 270.0, "z": 600.0, "x_initial": 0.0, "y_initial": 270.0, "z_target": 600.0, "log2FC": 2.1451979775222, "padj": 2.98184394291662e-09, "node_status": "Present; significant", "matched_as": "TNFRSF11B", "is_hub": false}, {"id": "MAP3K7", "label": "TAK1", "pathways": ["osteoclast"], "modules": ["Signaling cascade"], "compartments": ["Cytosol"], "x": 288.0, "y": 180.0, "z": 600.0, "x_initial": 288.0, "y_initial": 180.0, "z_target": 600.0, "log2FC": -0.129857398182727, "padj": 0.483995368892617, "node_status": "Present; not significant", "matched_as": "MAP3K7", "is_hub": false}, {"id": "MAPK14", "label": "p38", "pathways": ["osteoclast"], "modules": ["Signaling cascade"], "compartments": ["Cytosol"], "x": 378.0, "y": 225.0, "z": 600.0, "x_initial": 378.0, "y_initial": 225.0, "z_target": 600.0, "log2FC": -0.931736982801504, "padj": 0.000253075901793176, "node_status": "Present; significant", "matched_as": "MAPK14", "is_hub": false}, {"id": "MAPK1", "label": "ERK", "pathways": ["osteoclast"], "modules": ["Signaling cascade"], "compartments": ["Cytosol"], "x": 378.0, "y": 135.0, "z": 600.0, "x_initial": 378.0, "y_initial": 135.0, "z_target": 600.0, "log2FC": 0.0252146844260956, "padj": 0.91387677478537, "node_status": "Present; not significant", "matched_as": "MAPK1", "is_hub": false}, {"id": "JUN", "label": "c-Jun", "pathways": ["osteoclast"], "modules": ["Transcription factors"], "compartments": ["Nucleus"], "x": 495.0, "y": 225.0, "z": 600.0, "x_initial": 495.0, "y_initial": 225.0, "z_target": 600.0, "log2FC": 1.96638563571754, "padj": 7.54279183660488e-10, "node_status": "Present; significant", "matched_as": "JUN", "is_hub": false}, {"id": "FOS", "label": "c-Fos", "pathways": ["osteoclast"], "modules": ["Transcription factors"], "compartments": ["Nucleus"], "x": 495.0, "y": 135.0, "z": 600.0, "x_initial": 495.0, "y_initial": 135.0, "z_target": 600.0, "log2FC": 1.04084061666603, "padj": 0.00502165185919665, "node_status": "Present; significant", "matched_as": "FOS", "is_hub": false}, {"id": "NFATC1", "label": "NFATc1", "pathways": ["osteoclast"], "modules": ["Transcription factors"], "compartments": ["Nucleus"], "x": 585.0, "y": 180.0, "z": 600.0, "x_initial": 585.0, "y_initial": 180.0, "z_target": 600.0, "log2FC": 1.78701607027921, "padj": 8.04002721412418e-14, "node_status": "Present; significant", "matched_as": "NFATC1", "is_hub": false}, {"id": "ACP5", "label": "TRAP", "pathways": ["osteoclast"], "modules": ["OC markers"], "compartments": ["Cytosol"], "x": 720.0, "y": 270.0, "z": 600.0, "x_initial": 720.0, "y_initial": 270.0, "z_target": 600.0, "log2FC": -4.02901158706641, "padj": 0.00082315441076987, "node_status": "Present; significant", "matched_as": "ACP5", "is_hub": false}, {"id": "CTSK", "label": "CathK", "pathways": ["osteoclast"], "modules": ["OC markers"], "compartments": ["Cytosol"], "x": 720.0, "y": 216.0, "z": 600.0, "x_initial": 720.0, "y_initial": 216.0, "z_target": 600.0, "log2FC": -1.83159076427999, "padj": 4.63774481284828e-15, "node_status": "Present; significant", "matched_as": "CTSK", "is_hub": false}, {"id": "MMP9", "label": "MMP9", "pathways": ["osteoclast"], "modules": ["OC markers"], "compartments": ["Secreted"], "x": 720.0, "y": 162.0, "z": 600.0, "x_initial": 720.0, "y_initial": 162.0, "z_target": 600.0, "log2FC": -1.23119294277269, "padj": 0.0580821054801319, "node_status": "Present; not significant", "matched_as": "MMP9", "is_hub": false}, {"id": "CALCR", "label": "CTR", "pathways": ["osteoclast"], "modules": ["OC markers"], "compartments": ["Plasma membrane"], "x": 720.0, "y": 108.0, "z": 600.0, "x_initial": 720.0, "y_initial": 108.0, "z_target": 600.0, "log2FC": 2.29427769175334, "padj": 2.01563235716954e-06, "node_status": "Present; significant", "matched_as": "CALCR", "is_hub": false}, {"id": "DCSTAMP", "label": "DC-STAMP", "pathways": ["osteoclast"], "modules": ["OC markers"], "compartments": ["Plasma membrane"], "x": 720.0, "y": 54.0, "z": 600.0, "x_initial": 720.0, "y_initial": 54.0, "z_target": 600.0, "log2FC": -3.90871353758576, "padj": 3.56140843564246e-20, "node_status": "Present; significant", "matched_as": "DCSTAMP", "is_hub": false}, {"id": "BMP2", "label": "BMP2", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Secreted"], "x": 0.0, "y": 315.0, "z": 750.0, "x_initial": 0.0, "y_initial": 315.0, "z_target": 750.0, "log2FC": 0.465045943966925, "padj": 0.22812449222512, "node_status": "Present; not significant", "matched_as": "BMP2", "is_hub": false}, {"id": "BMP4", "label": "BMP4", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Secreted"], "x": 0.0, "y": 252.0, "z": 750.0, "x_initial": 0.0, "y_initial": 252.0, "z_target": 750.0, "log2FC": -0.231419483717287, "padj": 0.590954457071543, "node_status": "Present; not significant", "matched_as": "BMP4", "is_hub": false}, {"id": "BMP7", "label": "BMP7", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Secreted"], "x": 0.0, "y": 189.0, "z": 750.0, "x_initial": 0.0, "y_initial": 189.0, "z_target": 750.0, "log2FC": 0.994884584593551, "padj": 0.000451467567589667, "node_status": "Present; significant", "matched_as": "BMP7", "is_hub": false}, {"id": "BMPR1A", "label": "BMPR1A", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Plasma membrane"], "x": 108.0, "y": 288.0, "z": 750.0, "x_initial": 108.0, "y_initial": 288.0, "z_target": 750.0, "log2FC": 0.736188908559173, "padj": 0.00117054584606473, "node_status": "Present; significant", "matched_as": "BMPR1A", "is_hub": false}, {"id": "BMPR2", "label": "BMPR2", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Plasma membrane"], "x": 108.0, "y": 216.0, "z": 750.0, "x_initial": 108.0, "y_initial": 216.0, "z_target": 750.0, "log2FC": 0.255732683967185, "padj": 0.296711524507958, "node_status": "Present; not significant", "matched_as": "BMPR2", "is_hub": false}, {"id": "SMAD1", "label": "SMAD1", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Cytosol"], "x": 216.0, "y": 288.0, "z": 750.0, "x_initial": 216.0, "y_initial": 288.0, "z_target": 750.0, "log2FC": 0.266658775828682, "padj": 0.142709795278562, "node_status": "Present; not significant", "matched_as": "SMAD1", "is_hub": false}, {"id": "SMAD5", "label": "SMAD5", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Cytosol"], "x": 216.0, "y": 216.0, "z": 750.0, "x_initial": 216.0, "y_initial": 216.0, "z_target": 750.0, "log2FC": 0.666252250221157, "padj": 0.0028926834798672, "node_status": "Present; significant", "matched_as": "SMAD5", "is_hub": false}, {"id": "SMAD4", "label": "SMAD4", "pathways": ["osteoblast"], "modules": ["BMP signaling"], "compartments": ["Nucleus"], "x": 306.0, "y": 252.0, "z": 750.0, "x_initial": 306.0, "y_initial": 252.0, "z_target": 750.0, "log2FC": 1.65958683972956, "padj": 4.69866730685771e-13, "node_status": "Present; significant", "matched_as": "SMAD4", "is_hub": false}, {"id": "WNT3A", "label": "Wnt3a", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Secreted"], "x": 0.0, "y": 0.0, "z": 750.0, "x_initial": 0.0, "y_initial": 0.0, "z_target": 750.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "FZD1", "label": "Fzd1", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Plasma membrane"], "x": 108.0, "y": 54.0, "z": 750.0, "x_initial": 108.0, "y_initial": 54.0, "z_target": 750.0, "log2FC": 0.710890244023576, "padj": 0.0118563830474004, "node_status": "Present; significant", "matched_as": "FZD1", "is_hub": false}, {"id": "LRP5", "label": "LRP5", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Plasma membrane"], "x": 108.0, "y": 0.0, "z": 750.0, "x_initial": 108.0, "y_initial": 0.0, "z_target": 750.0, "log2FC": 0.586306626760536, "padj": 0.0562181288037364, "node_status": "Present; not significant", "matched_as": "LRP5", "is_hub": false}, {"id": "LRP6", "label": "LRP6", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Plasma membrane"], "x": 108.0, "y": -54.0, "z": 750.0, "x_initial": 108.0, "y_initial": -54.0, "z_target": 750.0, "log2FC": 0.673541211785137, "padj": 0.00339802116194046, "node_status": "Present; significant", "matched_as": "LRP6", "is_hub": false}, {"id": "DVL2", "label": "DVL2", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Cytosol"], "x": 216.0, "y": 27.0, "z": 750.0, "x_initial": 216.0, "y_initial": 27.0, "z_target": 750.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "GSK3B", "label": "GSK3β", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Cytosol"], "x": 216.0, "y": -45.0, "z": 750.0, "x_initial": 216.0, "y_initial": -45.0, "z_target": 750.0, "log2FC": -0.118689538898227, "padj": 0.452031996448803, "node_status": "Present; not significant", "matched_as": "GSK3B", "is_hub": false}, {"id": "APC", "label": "APC", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Cytosol"], "x": 306.0, "y": -45.0, "z": 750.0, "x_initial": 306.0, "y_initial": -45.0, "z_target": 750.0, "log2FC": 0.272770014182881, "padj": 0.160410198836954, "node_status": "Present; not significant", "matched_as": "APC", "is_hub": false}, {"id": "AXIN2", "label": "Axin2", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Cytosol"], "x": 306.0, "y": -99.0, "z": 750.0, "x_initial": 306.0, "y_initial": -99.0, "z_target": 750.0, "log2FC": 0.843385955426143, "padj": 0.00151000589553428, "node_status": "Present; significant", "matched_as": "AXIN2", "is_hub": false}, {"id": "CTNNB1", "label": "β-catenin", "pathways": ["osteoblast"], "modules": ["Wnt signaling"], "compartments": ["Nucleus"], "x": 306.0, "y": 27.0, "z": 750.0, "x_initial": 306.0, "y_initial": 27.0, "z_target": 750.0, "log2FC": -0.666983944137463, "padj": 0.0139381670931587, "node_status": "Present; significant", "matched_as": "CTNNB1", "is_hub": false}, {"id": "RUNX2", "label": "RUNX2", "pathways": ["osteoblast", "oxysterol"], "modules": ["Transcription factors", "OB readouts"], "compartments": ["Nucleus"], "x": 607.5, "y": 202.5, "z": 825.0, "x_initial": 607.5, "y_initial": 202.5, "z_target": 825.0, "log2FC": -1.14607059190778, "padj": 0.0683945948713598, "node_status": "Present; not significant", "matched_as": "RUNX2", "is_hub": true}, {"id": "SP7", "label": "Osterix", "pathways": ["osteoblast", "oxysterol"], "modules": ["Transcription factors", "OB readouts"], "compartments": ["Nucleus"], "x": 607.5, "y": 135.0, "z": 825.0, "x_initial": 607.5, "y_initial": 135.0, "z_target": 825.0, "log2FC": -0.587284793140008, "padj": 0.260594909218303, "node_status": "Present; not significant", "matched_as": "SP7", "is_hub": true}, {"id": "ATF4", "label": "ATF4", "pathways": ["osteoblast"], "modules": ["Transcription factors"], "compartments": ["Nucleus"], "x": 450.0, "y": 36.0, "z": 750.0, "x_initial": 450.0, "y_initial": 36.0, "z_target": 750.0, "log2FC": 0.871550244277185, "padj": 2.34361576474392e-09, "node_status": "Present; significant", "matched_as": "ATF4", "is_hub": false}, {"id": "COL1A1", "label": "COL1A1", "pathways": ["osteoblast"], "modules": ["OB markers"], "compartments": ["ECM"], "x": 630.0, "y": 252.0, "z": 750.0, "x_initial": 630.0, "y_initial": 252.0, "z_target": 750.0, "log2FC": 2.62523345750131, "padj": 5.25073018523773e-15, "node_status": "Present; significant", "matched_as": "COL1A1", "is_hub": false}, {"id": "ALPL", "label": "ALP", "pathways": ["osteoblast"], "modules": ["OB markers"], "compartments": ["Plasma membrane"], "x": 630.0, "y": 198.0, "z": 750.0, "x_initial": 630.0, "y_initial": 198.0, "z_target": 750.0, "log2FC": -1.67071351487861, "padj": 0.0180351222098247, "node_status": "Present; significant", "matched_as": "ALPL", "is_hub": false}, {"id": "BGLAP", "label": "OCN", "pathways": ["osteoblast"], "modules": ["OB markers"], "compartments": ["Secreted"], "x": 630.0, "y": 144.0, "z": 750.0, "x_initial": 630.0, "y_initial": 144.0, "z_target": 750.0, "log2FC": -5.24340599070571, "padj": 2.8977247835495e-11, "node_status": "Present; significant", "matched_as": "BGLAP", "is_hub": false}, {"id": "SPP1", "label": "OPN", "pathways": ["osteoblast"], "modules": ["OB markers"], "compartments": ["Secreted"], "x": 630.0, "y": 90.0, "z": 750.0, "x_initial": 630.0, "y_initial": 90.0, "z_target": 750.0, "log2FC": -2.26072371094015, "padj": 1.77802210603782e-06, "node_status": "Present; significant", "matched_as": "SPP1", "is_hub": false}, {"id": "IBSP", "label": "BSP", "pathways": ["osteoblast"], "modules": ["OB markers"], "compartments": ["ECM"], "x": 630.0, "y": 36.0, "z": 750.0, "x_initial": 630.0, "y_initial": 36.0, "z_target": 750.0, "log2FC": -5.06548056546235, "padj": 5.23180654482383e-07, "node_status": "Present; significant", "matched_as": "IBSP", "is_hub": false}, {"id": "SOST", "label": "Sclerostin", "pathways": ["osteoblast"], "modules": ["Negative regulators"], "compartments": ["Secreted"], "x": 0.0, "y": -126.0, "z": 750.0, "x_initial": 0.0, "y_initial": -126.0, "z_target": 750.0, "log2FC": -6.52307958551043, "padj": 1.09142598721629e-33, "node_status": "Present; significant", "matched_as": "SOST", "is_hub": false}, {"id": "DKK1", "label": "DKK1", "pathways": ["osteoblast"], "modules": ["Negative regulators"], "compartments": ["Secreted"], "x": 0.0, "y": -180.0, "z": 750.0, "x_initial": 0.0, "y_initial": -180.0, "z_target": 750.0, "log2FC": -6.17032941163546, "padj": 9.71752072661059e-30, "node_status": "Present; significant", "matched_as": "DKK1", "is_hub": false}, {"id": "CH25H", "label": "CH25H", "pathways": ["oxysterol"], "modules": ["Biosynthesis"], "compartments": ["ER"], "x": 225.0, "y": 360.0, "z": 900.0, "x_initial": 225.0, "y_initial": 360.0, "z_target": 900.0, "log2FC": -0.432689072536068, "padj": 0.257615523855961, "node_status": "Present; not significant", "matched_as": "CH25H", "is_hub": false}, {"id": "CYP7B1", "label": "CYP7B1", "pathways": ["oxysterol"], "modules": ["Biosynthesis"], "compartments": ["ER"], "x": 360.0, "y": 360.0, "z": 900.0, "x_initial": 360.0, "y_initial": 360.0, "z_target": 900.0, "log2FC": -1.1045266297737, "padj": 8.24132017549165e-07, "node_status": "Present; significant", "matched_as": "CYP7B1", "is_hub": false}, {"id": "CYP27A1", "label": "CYP27A1", "pathways": ["oxysterol"], "modules": ["Biosynthesis"], "compartments": ["Mitochondria"], "x": 225.0, "y": 90.0, "z": 900.0, "x_initial": 225.0, "y_initial": 90.0, "z_target": 900.0, "log2FC": -1.19191818027338, "padj": 0.0105364977354109, "node_status": "Present; significant", "matched_as": "CYP27A1", "is_hub": false}, {"id": "CYP11A1", "label": "CYP11A1", "pathways": ["oxysterol"], "modules": ["Biosynthesis"], "compartments": ["Mitochondria"], "x": 225.0, "y": 225.0, "z": 900.0, "x_initial": 225.0, "y_initial": 225.0, "z_target": 900.0, "log2FC": 0.482379059431835, "padj": 0.191670163378608, "node_status": "Present; not significant", "matched_as": "CYP11A1", "is_hub": false}, {"id": "SMO", "label": "SMO", "pathways": ["oxysterol"], "modules": ["Hedgehog/Osteogenic"], "compartments": ["Plasma membrane"], "x": 360.0, "y": 225.0, "z": 900.0, "x_initial": 360.0, "y_initial": 225.0, "z_target": 900.0, "log2FC": 1.07107364152185, "padj": 2.42082577571568e-05, "node_status": "Present; significant", "matched_as": "SMO", "is_hub": false}, {"id": "PTCH1", "label": "PTCH1", "pathways": ["oxysterol"], "modules": ["Hedgehog/Osteogenic"], "compartments": ["Plasma membrane"], "x": 360.0, "y": 162.0, "z": 900.0, "x_initial": 360.0, "y_initial": 162.0, "z_target": 900.0, "log2FC": -1.02787341969618, "padj": 0.00492784552794883, "node_status": "Present; significant", "matched_as": "PTCH1", "is_hub": false}, {"id": "GLI1", "label": "GLI1", "pathways": ["oxysterol"], "modules": ["Hedgehog/Osteogenic"], "compartments": ["Nucleus"], "x": 495.0, "y": 225.0, "z": 900.0, "x_initial": 495.0, "y_initial": 225.0, "z_target": 900.0, "log2FC": -2.00915822144477, "padj": 0.000174012802222417, "node_status": "Present; significant", "matched_as": "GLI1", "is_hub": false}, {"id": "GLI2", "label": "GLI2", "pathways": ["oxysterol"], "modules": ["Hedgehog/Osteogenic"], "compartments": ["Nucleus"], "x": 495.0, "y": 162.0, "z": 900.0, "x_initial": 495.0, "y_initial": 162.0, "z_target": 900.0, "log2FC": 0.389886279097891, "padj": 0.139782702788429, "node_status": "Present; not significant", "matched_as": "GLI2", "is_hub": false}, {"id": "HES1", "label": "HES1", "pathways": ["oxysterol"], "modules": ["Hedgehog/Osteogenic"], "compartments": ["Nucleus"], "x": 630.0, "y": 225.0, "z": 900.0, "x_initial": 630.0, "y_initial": 225.0, "z_target": 900.0, "log2FC": 2.15481746028001, "padj": 3.01580600400126e-14, "node_status": "Present; significant", "matched_as": "HES1", "is_hub": false}, {"id": "HEY1", "label": "HEY1", "pathways": ["oxysterol"], "modules": ["Hedgehog/Osteogenic"], "compartments": ["Nucleus"], "x": 630.0, "y": 162.0, "z": 900.0, "x_initial": 630.0, "y_initial": 162.0, "z_target": 900.0, "log2FC": -1.11879055591678, "padj": 0.00102792302130582, "node_status": "Present; significant", "matched_as": "HEY1", "is_hub": false}, {"id": "GPR183", "label": "GPR183/EBI2", "pathways": ["oxysterol"], "modules": ["Immune chemotaxis"], "compartments": ["Plasma membrane"], "x": 495.0, "y": 360.0, "z": 900.0, "x_initial": 495.0, "y_initial": 360.0, "z_target": 900.0, "log2FC": -0.723749477038785, "padj": 0.178955093546602, "node_status": "Present; not significant", "matched_as": "GPR183", "is_hub": false}, {"id": "HSD3B7", "label": "HSD3B7", "pathways": ["oxysterol"], "modules": ["Immune chemotaxis"], "compartments": ["ER"], "x": 495.0, "y": 423.0, "z": 900.0, "x_initial": 495.0, "y_initial": 423.0, "z_target": 900.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}, {"id": "NR1H3", "label": "LXRα", "pathways": ["oxysterol"], "modules": ["LXR/Cholesterol"], "compartments": ["Nucleus"], "x": 360.0, "y": 18.0, "z": 900.0, "x_initial": 360.0, "y_initial": 18.0, "z_target": 900.0, "log2FC": 0.381486583100997, "padj": 0.00137401716763321, "node_status": "Present; significant", "matched_as": "NR1H3", "is_hub": false}, {"id": "ABCA1", "label": "ABCA1", "pathways": ["oxysterol"], "modules": ["LXR/Cholesterol"], "compartments": ["Plasma membrane"], "x": 495.0, "y": 72.0, "z": 900.0, "x_initial": 495.0, "y_initial": 72.0, "z_target": 900.0, "log2FC": -2.38538471176189, "padj": 4.01869797408776e-09, "node_status": "Present; significant", "matched_as": "ABCA1", "is_hub": false}, {"id": "ABCG1", "label": "ABCG1", "pathways": ["oxysterol"], "modules": ["LXR/Cholesterol"], "compartments": ["Plasma membrane"], "x": 495.0, "y": 18.0, "z": 900.0, "x_initial": 495.0, "y_initial": 18.0, "z_target": 900.0, "log2FC": -2.99537261778169, "padj": 4.17081132744624e-07, "node_status": "Present; significant", "matched_as": "ABCG1", "is_hub": false}, {"id": "INSIG1", "label": "INSIG1", "pathways": ["oxysterol"], "modules": ["Cholesterol sensing"], "compartments": ["ER"], "x": 360.0, "y": 450.0, "z": 900.0, "x_initial": 360.0, "y_initial": 450.0, "z_target": 900.0, "log2FC": 0.349218970775604, "padj": 0.335752789931983, "node_status": "Present; not significant", "matched_as": "INSIG1", "is_hub": false}, {"id": "SCAP", "label": "SCAP", "pathways": ["oxysterol"], "modules": ["Cholesterol sensing"], "compartments": ["ER"], "x": 495.0, "y": 495.0, "z": 900.0, "x_initial": 495.0, "y_initial": 495.0, "z_target": 900.0, "log2FC": 0.354947185215616, "padj": 0.00972016954222509, "node_status": "Present; significant", "matched_as": "SCAP", "is_hub": false}, {"id": "SREBF2", "label": "SREBP2", "pathways": ["oxysterol"], "modules": ["Cholesterol sensing"], "compartments": ["Nucleus"], "x": 630.0, "y": 495.0, "z": 900.0, "x_initial": 630.0, "y_initial": 495.0, "z_target": 900.0, "log2FC": 0.585737641363161, "padj": 0.0185383220652751, "node_status": "Present; significant", "matched_as": "SREBF2", "is_hub": false}, {"id": "HMGCR", "label": "HMGCR", "pathways": ["oxysterol"], "modules": ["Cholesterol sensing"], "compartments": ["ER"], "x": 765.0, "y": 495.0, "z": 900.0, "x_initial": 765.0, "y_initial": 495.0, "z_target": 900.0, "log2FC": -0.0195489830385552, "padj": 0.967706487046281, "node_status": "Present; not significant", "matched_as": "HMGCR", "is_hub": false}, {"id": "SULT2B1", "label": "SULT2B1", "pathways": ["oxysterol"], "modules": ["Degradation"], "compartments": ["Cytosol"], "x": 630.0, "y": 405.0, "z": 900.0, "x_initial": 630.0, "y_initial": 405.0, "z_target": 900.0, "log2FC": null, "padj": null, "node_status": "Missing gene", "matched_as": null, "is_hub": false}], "links": [{"source": "DDX41", "target": "STING1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IFI16", "target": "STING1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "MB21D1", "target": "STING1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "ZBP1", "target": "TBK1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "STING1", "target": "TRAF3", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "STING1", "target": "TRAF6", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "TRAF3", "target": "TBK1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "TRAF6", "target": "IKBKB", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IKBKG", "target": "IKBKB", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "STING1", "target": "TBK1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "STING1", "target": "IKBKB", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "CHUK", "target": "NFKB1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IKBKB", "target": "NFKB1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IKBKB", "target": "RELA", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "TBK1", "target": "IRF3", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "TBK1", "target": "IRF7", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF3", "target": "IFNB1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF7", "target": "IFNB1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IFNB1", "target": "IFNAR1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IFNB1", "target": "IFNAR2", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IFNAR1", "target": "JAK1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IFNAR2", "target": "TYK2", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "JAK1", "target": "STAT1", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "TYK2", "target": "STAT2", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "STAT1", "target": "IRF9", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "STAT2", "target": "IRF9", "edge_class": "core", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF9", "target": "ISG15", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF9", "target": "MX1", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF9", "target": "OASL", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF9", "target": "IFIT5", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF9", "target": "RSAD2", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "RELA", "target": "IL6", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "RELA", "target": "TNF", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF3", "target": "CXCL10", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "IRF7", "target": "CCL5", "edge_class": "output", "edge_pathway": "cgas_sting", "pathway": "cgas_sting"}, {"source": "TNF", "target": "TNFRSF1A", "edge_class": "core", "edge_pathway": "shared_death_input", "pathway": "apoptosis"}, {"source": "TNFRSF1A", "target": "TRADD", "edge_class": "core", "edge_pathway": "shared_death_input", "pathway": "apoptosis"}, {"source": "TRADD", "target": "FADD", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "FADD", "target": "CASP8", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "CASP8", "target": "CASP3", "edge_class": "output", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "CASP8", "target": "CASP7", "edge_class": "output", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "CASP8", "target": "BID", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "BID", "target": "BAX", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "BAX", "target": "CYCS", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "CYCS", "target": "APAF1", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "APAF1", "target": "CASP9", "edge_class": "core", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "CASP9", "target": "CASP3", "edge_class": "output", "edge_pathway": "apoptosis_branch", "pathway": "apoptosis"}, {"source": "TNF", "target": "TNFRSF1A", "edge_class": "core", "edge_pathway": "shared_death_input", "pathway": "necroptosis"}, {"source": "TNFRSF1A", "target": "TRADD", "edge_class": "core", "edge_pathway": "shared_death_input", "pathway": "necroptosis"}, {"source": "TRADD", "target": "RIPK1", "edge_class": "core", "edge_pathway": "necroptosis_branch", "pathway": "necroptosis"}, {"source": "RIPK1", "target": "RIPK3", "edge_class": "core", "edge_pathway": "necroptosis_branch", "pathway": "necroptosis"}, {"source": "RIPK3", "target": "MLKL", "edge_class": "output", "edge_pathway": "necroptosis_branch", "pathway": "necroptosis"}, {"source": "ZBP1", "target": "RIPK3", "edge_class": "core", "edge_pathway": "necroptosis_branch", "pathway": "necroptosis"}, {"source": "CASP8", "target": "RIPK1", "edge_class": "core", "edge_pathway": "necroptosis_branch", "pathway": "necroptosis"}, {"source": "TLR4", "target": "MYD88", "edge_class": "core", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "MYD88", "target": "IRAK4", "edge_class": "core", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "IRAK4", "target": "TRAF6", "edge_class": "core", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "TRAF6", "target": "NFKB1", "edge_class": "core", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "TRAF6", "target": "RELA", "edge_class": "core", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "NFKB1", "target": "NLRP3", "edge_class": "output", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "RELA", "target": "IL1B", "edge_class": "output", "edge_pathway": "priming", "pathway": "inflammasome"}, {"source": "NEK7", "target": "NLRP3", "edge_class": "core", "edge_pathway": "activation", "pathway": "inflammasome"}, {"source": "TXNIP", "target": "NLRP3", "edge_class": "core", "edge_pathway": "activation", "pathway": "inflammasome"}, {"source": "NLRP3", "target": "PYCARD", "edge_class": "core", "edge_pathway": "activation", "pathway": "inflammasome"}, {"source": "AIM2", "target": "PYCARD", "edge_class": "core", "edge_pathway": "activation", "pathway": "inflammasome"}, {"source": "NLRC4", "target": "PYCARD", "edge_class": "core", "edge_pathway": "activation", "pathway": "inflammasome"}, {"source": "PYCARD", "target": "CASP1", "edge_class": "core", "edge_pathway": "activation", "pathway": "inflammasome"}, {"source": "CASP1", "target": "IL1B", "edge_class": "output", "edge_pathway": "effector", "pathway": "inflammasome"}, {"source": "CASP1", "target": "IL18", "edge_class": "output", "edge_pathway": "effector", "pathway": "inflammasome"}, {"source": "CASP1", "target": "GSDMD", "edge_class": "output", "edge_pathway": "effector", "pathway": "inflammasome"}, {"source": "CSF1", "target": "CSF1R", "edge_class": "core", "edge_pathway": "csf1_survival", "pathway": "osteoclast"}, {"source": "TNFSF11", "target": "TNFRSF11A", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "TNFRSF11B", "target": "TNFSF11", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "TNFRSF11A", "target": "TRAF6", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "TRAF6", "target": "MAP3K7", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "MAP3K7", "target": "MAPK14", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "MAP3K7", "target": "MAPK1", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "MAP3K7", "target": "NFKB1", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "MAPK14", "target": "JUN", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "MAPK1", "target": "FOS", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "JUN", "target": "NFATC1", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "FOS", "target": "NFATC1", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "NFKB1", "target": "NFATC1", "edge_class": "core", "edge_pathway": "rankl_rank", "pathway": "osteoclast"}, {"source": "NFATC1", "target": "ACP5", "edge_class": "output", "edge_pathway": "oc_output", "pathway": "osteoclast"}, {"source": "NFATC1", "target": "CTSK", "edge_class": "output", "edge_pathway": "oc_output", "pathway": "osteoclast"}, {"source": "NFATC1", "target": "MMP9", "edge_class": "output", "edge_pathway": "oc_output", "pathway": "osteoclast"}, {"source": "NFATC1", "target": "CALCR", "edge_class": "output", "edge_pathway": "oc_output", "pathway": "osteoclast"}, {"source": "NFATC1", "target": "DCSTAMP", "edge_class": "output", "edge_pathway": "oc_output", "pathway": "osteoclast"}, {"source": "BMP2", "target": "BMPR1A", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "BMP4", "target": "BMPR1A", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "BMP7", "target": "BMPR2", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "BMPR1A", "target": "SMAD1", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "BMPR2", "target": "SMAD5", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "SMAD1", "target": "SMAD4", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "SMAD5", "target": "SMAD4", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "SMAD4", "target": "RUNX2", "edge_class": "core", "edge_pathway": "bmp_signaling", "pathway": "osteoblast"}, {"source": "WNT3A", "target": "FZD1", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "WNT3A", "target": "LRP5", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "WNT3A", "target": "LRP6", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "FZD1", "target": "DVL2", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "DVL2", "target": "GSK3B", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "GSK3B", "target": "APC", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "GSK3B", "target": "AXIN2", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "DVL2", "target": "CTNNB1", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "CTNNB1", "target": "RUNX2", "edge_class": "core", "edge_pathway": "wnt_signaling", "pathway": "osteoblast"}, {"source": "SOST", "target": "LRP5", "edge_class": "core", "edge_pathway": "wnt_inhibition", "pathway": "osteoblast"}, {"source": "DKK1", "target": "LRP6", "edge_class": "core", "edge_pathway": "wnt_inhibition", "pathway": "osteoblast"}, {"source": "RUNX2", "target": "SP7", "edge_class": "core", "edge_pathway": "ob_differentiation", "pathway": "osteoblast"}, {"source": "SP7", "target": "ATF4", "edge_class": "core", "edge_pathway": "ob_differentiation", "pathway": "osteoblast"}, {"source": "RUNX2", "target": "COL1A1", "edge_class": "output", "edge_pathway": "ob_output", "pathway": "osteoblast"}, {"source": "RUNX2", "target": "ALPL", "edge_class": "output", "edge_pathway": "ob_output", "pathway": "osteoblast"}, {"source": "SP7", "target": "BGLAP", "edge_class": "output", "edge_pathway": "ob_output", "pathway": "osteoblast"}, {"source": "SP7", "target": "SPP1", "edge_class": "output", "edge_pathway": "ob_output", "pathway": "osteoblast"}, {"source": "ATF4", "target": "BGLAP", "edge_class": "output", "edge_pathway": "ob_output", "pathway": "osteoblast"}, {"source": "ATF4", "target": "IBSP", "edge_class": "output", "edge_pathway": "ob_output", "pathway": "osteoblast"}, {"source": "IFNB1", "target": "IFNAR1", "edge_class": "core", "edge_pathway": "ifn_input", "pathway": "oxysterol"}, {"source": "IFNAR1", "target": "CH25H", "edge_class": "core", "edge_pathway": "ifn_input", "pathway": "oxysterol"}, {"source": "CH25H", "target": "CYP7B1", "edge_class": "core", "edge_pathway": "biosynthesis", "pathway": "oxysterol"}, {"source": "CH25H", "target": "NR1H3", "edge_class": "core", "edge_pathway": "lxr_arm", "pathway": "oxysterol"}, {"source": "CH25H", "target": "INSIG1", "edge_class": "core", "edge_pathway": "cholesterol_sensing", "pathway": "oxysterol"}, {"source": "CYP7B1", "target": "GPR183", "edge_class": "output", "edge_pathway": "chemotaxis_arm", "pathway": "oxysterol"}, {"source": "HSD3B7", "target": "GPR183", "edge_class": "core", "edge_pathway": "chemotaxis_arm", "pathway": "oxysterol"}, {"source": "CYP11A1", "target": "SMO", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "CYP27A1", "target": "NR1H3", "edge_class": "core", "edge_pathway": "lxr_arm", "pathway": "oxysterol"}, {"source": "PTCH1", "target": "SMO", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "SMO", "target": "GLI1", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "SMO", "target": "GLI2", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "GLI1", "target": "HES1", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "GLI1", "target": "HEY1", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "GLI2", "target": "HES1", "edge_class": "core", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "HES1", "target": "RUNX2", "edge_class": "output", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "HEY1", "target": "RUNX2", "edge_class": "output", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "RUNX2", "target": "SP7", "edge_class": "output", "edge_pathway": "hedgehog_arm", "pathway": "oxysterol"}, {"source": "NR1H3", "target": "ABCA1", "edge_class": "output", "edge_pathway": "lxr_arm", "pathway": "oxysterol"}, {"source": "NR1H3", "target": "ABCG1", "edge_class": "output", "edge_pathway": "lxr_arm", "pathway": "oxysterol"}, {"source": "NR1H3", "target": "TNFSF11", "edge_class": "output", "edge_pathway": "lxr_arm", "pathway": "oxysterol"}, {"source": "INSIG1", "target": "SCAP", "edge_class": "core", "edge_pathway": "cholesterol_sensing", "pathway": "oxysterol"}, {"source": "SCAP", "target": "SREBF2", "edge_class": "core", "edge_pathway": "cholesterol_sensing", "pathway": "oxysterol"}, {"source": "SREBF2", "target": "HMGCR", "edge_class": "output", "edge_pathway": "cholesterol_sensing", "pathway": "oxysterol"}, {"source": "SULT2B1", "target": "CH25H", "edge_class": "core", "edge_pathway": "degradation", "pathway": "oxysterol"}]};
+
+// ============================================================
+// Constants & State
+// ============================================================
+const PATHWAY_COLORS = {"cgas_sting": "#6A5ACD", "apoptosis": "#A33A3A", "necroptosis": "#2F7F56", "inflammasome": "#FF8C00", "osteoclast": "#1F4E79", "osteoblast": "#1E90FF", "oxysterol": "#8B6914"};
+const LAYER_Z = {"cgas_sting": 0, "apoptosis": 150, "necroptosis": 300, "inflammasome": 450, "osteoclast": 600, "osteoblast": 750, "oxysterol": 900};
+const PATHWAY_KEYS = ["cgas_sting", "apoptosis", "necroptosis", "inflammasome", "osteoclast", "osteoblast", "oxysterol"];
+
+const state = {
+  visiblePathways: new Set(Object.keys(DATA.pathways)),
+  showLabels: true,
+  showArrows: true,
+  filterSignificant: false,
+  filterHubs: false,
+  highlightNodes: new Set(),
+  highlightLinks: new Set(),
+  selectedNode: null,
+  paused: false,
+  searchMatches: new Set(),
+};
+
+// ============================================================
+// Helpers
+// ============================================================
+// Cap color scale at ±3 so biologically meaningful FCs (1-2) aren't washed out
+const LFC_CAP = 3.0;
+
+function lfc2color(lfc) {
+  if (lfc === null || lfc === undefined || isNaN(lfc)) return '#555555';
+  const t = Math.max(-1, Math.min(1, lfc / LFC_CAP));
+  if (t <= 0) {
+    const s = -t;
+    return `rgb(${Math.round(33  + (247-33) *(1-s))},`
+         + `${Math.round(102 + (247-102)*(1-s))},`
+         + `${Math.round(172 + (247-172)*(1-s))})`;
+  } else {
+    return `rgb(${Math.round(247 + (178-247)*t)},`
+         + `${Math.round(247 + (24 -247)*t)},`
+         + `${Math.round(247 + (43 -247)*t)})`;
+  }
+}
+
+function nodeVal(node) {
+  switch (node.node_status) {
+    case 'Present; significant':     return 12;
+    case 'Present; not significant': return 5;
+    case 'Present; padj NA':         return 5;
+    default:                         return 2;
+  }
+}
+
+function isNodeVisible(node) {
+  if (state.filterSignificant && node.node_status !== 'Present; significant') return false;
+  if (state.filterHubs && !node.is_hub) return false;
+  return node.pathways.some(p => state.visiblePathways.has(p));
+}
+
+function fmt(v, d=3) {
+  if (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) return 'NA';
+  return (+v).toFixed(d);
+}
+
+// Pre-build lookup maps
+const nodeMap = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
+const neighborNodes = {};
+const nodeLinks = {};
+DATA.links.forEach(lk => {
+  const s = lk.source, t = lk.target;
+  (neighborNodes[s] = neighborNodes[s] || new Set()).add(t);
+  (neighborNodes[t] = neighborNodes[t] || new Set()).add(s);
+  (nodeLinks[s] = nodeLinks[s] || []).push(lk);
+  (nodeLinks[t] = nodeLinks[t] || []).push(lk);
+});
+
+// ============================================================
+// Graph Data Filtering
+// ============================================================
+function getGraphData() {
+  const visNodes = DATA.nodes.filter(isNodeVisible);
+  const visIds = new Set(visNodes.map(n => n.id));
+  const visLinks = DATA.links.filter(lk => {
+    const s = typeof lk.source === 'object' ? lk.source.id : lk.source;
+    const t = typeof lk.target === 'object' ? lk.target.id : lk.target;
+    return visIds.has(s) && visIds.has(t) && state.visiblePathways.has(lk.pathway);
+  });
+  return { nodes: visNodes, links: visLinks };
+}
+
+// ============================================================
+// THREE.js node object builder
+// ============================================================
+function makeTextSprite(T, text, fontSize) {
+  const canvas = document.createElement('canvas');
+  const scale = 3;
+  // Wide enough for longest labels (TNFRSF11A, β-catenin, etc.)
+  canvas.width = 512 * scale;
+  canvas.height = 64 * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  ctx.clearRect(0, 0, 512, 64);
+  ctx.font = `bold ${fontSize}px 'Segoe UI', sans-serif`;
+  ctx.fillStyle = 'rgba(220,225,255,0.95)';
+  ctx.fillText(text, 3, fontSize + 8);
+  const texture = new T.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  const mat = new T.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, depthTest: false });
+  const sprite = new T.Sprite(mat);
+  sprite.scale.set(90, 22, 1);
+  return sprite;
+}
+
+function getThree() {
+  return (typeof THREE !== 'undefined') ? THREE : null;
+}
+
+function buildNodeObject(node) {
+  const T = getThree();
+  if (!T) return null;  // fall back to default sphere rendering
+
+  const group = new T.Group();
+  const radius = nodeVal(node) * 0.7;
+  const colorStr = lfc2color(node.log2FC);
+  const opacity = node.node_status === 'Missing gene' ? 0.45 : 0.88;
+  const mat = new T.MeshLambertMaterial({
+    color: new T.Color(colorStr), transparent: true, opacity
+  });
+  group.add(new T.Mesh(new T.SphereGeometry(radius, 12, 12), mat));
+
+  if (node.is_hub) {
+    const ringMat = new T.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.75 });
+    group.add(new T.Mesh(new T.TorusGeometry(radius + 2, 0.6, 8, 24), ringMat));
+  }
+
+  // Search match: bright white outer ring
+  if (state.searchMatches.has(node.id)) {
+    const searchRingGeo = new T.TorusGeometry(radius + 3.5, 0.8, 8, 24);
+    const searchRingMat = new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 });
+    group.add(new T.Mesh(searchRingGeo, searchRingMat));
+  }
+
+  if (state.showLabels) {
+    const sprite = makeTextSprite(T, node.label || node.id, node.is_hub ? 36 : 32);
+    sprite.position.set(radius + 1, radius + 1, 0);
+    group.add(sprite);
+  }
+
+  return group;
+}
+
+// ============================================================
+// Graph Initialization
+// ============================================================
+let Graph = null;
+
+function buildGraph() {
+  const container = document.getElementById('graph-container');
+
+  // 3d-force-graph bundles Three.js internally. After init we grab it from the renderer
+  // so nodeThreeObject uses the SAME Three.js instance (no duplicate conflict).
+  Graph = ForceGraph3D()(container)
+    .backgroundColor('#0a0a1a')
+    .graphData(getGraphData())
+    .nodeId('id')
+    .nodeVal(n => nodeVal(n))
+    .nodeColor(n => {
+      if (state.highlightNodes.size > 0 && !state.highlightNodes.has(n.id))
+        return 'rgba(60,60,80,0.2)';
+      return lfc2color(n.log2FC);
+    })
+    .nodeOpacity(0.9)
+    .nodeThreeObject(buildNodeObject)
+    .nodeThreeObjectExtend(false)
+    .linkSource('source')
+    .linkTarget('target')
+    .linkColor(lk => {
+      if (state.highlightLinks.size > 0 && !state.highlightLinks.has(lk))
+        return 'rgba(40,40,60,0.12)';
+      return PATHWAY_COLORS[lk.pathway] || '#666';
+    })
+    .linkWidth(lk => {
+      const srcId = typeof lk.source === 'object' ? lk.source.id : lk.source;
+      const srcNode = nodeMap[srcId];
+      const lfc = srcNode && srcNode.log2FC !== null ? Math.abs(srcNode.log2FC) : 0;
+      // Scale: base (core=2, output=1) boosted up to 2× by |log2FC| capped at LFC_CAP
+      const base = lk.edge_class === 'core' ? 2 : 1;
+      const boost = 1 + Math.min(lfc / LFC_CAP, 1);
+      const w = base * boost;
+      return state.highlightLinks.size > 0 && !state.highlightLinks.has(lk) ? w * 0.2 : w;
+    })
+    .linkDirectionalArrowLength(state.showArrows ? 4 : 0)
+    .linkDirectionalArrowRelPos(1)
+    .linkDirectionalParticles(2)
+    .linkDirectionalParticleWidth(lk => lk.edge_class === 'core' ? 2 : 1)
+    .linkDirectionalParticleColor(lk => PATHWAY_COLORS[lk.pathway] || '#888')
+    .linkDirectionalParticleSpeed(0.004)
+    .onNodeClick(onNodeClick)
+    .onNodeHover(onNodeHover)
+    .onBackgroundClick(resetHighlight)
+    .d3AlphaDecay(0.02)
+    .d3VelocityDecay(0.3)
+    .warmupTicks(80)
+    .cooldownTicks(200)
+    .onEngineStop(() => {
+      document.getElementById('loading').style.display = 'none';
+      updateStats();
+    });
+
+  // Tune default forces via built-in d3Force API
+  // (3d-force-graph creates charge, link, x, y, z forces automatically)
+  try {
+    const chargeFn = Graph.d3Force('charge');
+    if (chargeFn) chargeFn.strength(-120);
+
+    const linkFn = Graph.d3Force('link');
+    if (linkFn) linkFn.distance(50).strength(0.65);
+
+    // Gently bias nodes toward their layer z and initial x,y
+    const zFn = Graph.d3Force('z');
+    if (zFn) zFn.z(n => n.z_target).strength(0.08);
+
+    const xFn = Graph.d3Force('x');
+    if (xFn) xFn.x(n => n.x_initial).strength(0.04);
+
+    const yFn = Graph.d3Force('y');
+    if (yFn) yFn.y(n => n.y_initial).strength(0.04);
+  } catch(e) { console.warn('Force setup error:', e); }
+
+  // Add ambient + directional lights
+  try {
+    const T2 = getThree();
+    if (T2) {
+      const scene = Graph.scene();
+      scene.add(new T2.AmbientLight(0xffffff, 0.6));
+      const dirLight = new T2.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(300, 300, 300);
+      scene.add(dirLight);
+
+    }
+  } catch(e) { console.warn('Scene setup error:', e); }
+
+  updateStats();
+}
+
+// ============================================================
+// Interaction
+// ============================================================
+const tooltipEl = document.getElementById('tooltip');
+
+function negLog10(p) {
+  if (p === null || p === undefined || p <= 0) return 'NA';
+  return (-Math.log10(p)).toFixed(2);
+}
+
+function onNodeHover(node) {
+  if (!node) { tooltipEl.style.display = 'none'; return; }
+  const lfc = fmt(node.log2FC);
+  const padj = fmt(node.padj, 4);
+  const nl10 = negLog10(node.padj);
+  const matchNote = (node.matched_as && node.matched_as !== node.id)
+    ? `<span style="color:#888"> (matched as ${node.matched_as})</span>` : '';
+  const lfcClass = node.log2FC > 0 ? 'tt-up' : (node.log2FC < 0 ? 'tt-down' : '');
+  const sigClass = node.node_status === 'Present; significant' ? 'tt-sig' : '';
+  tooltipEl.innerHTML = `
+    <div class="tt-gene">${node.label || node.id}${matchNote}</div>
+    <div class="tt-row"><span class="tt-key">Symbol:</span><span class="tt-val">${node.id}</span></div>
+    <div class="tt-row"><span class="tt-key">Pathways:</span><span class="tt-val">${node.pathways.join(', ')}</span></div>
+    <div class="tt-row"><span class="tt-key">Module:</span><span class="tt-val">${(node.modules||[]).join(', ')||'NA'}</span></div>
+    <div class="tt-row"><span class="tt-key">Compartment:</span><span class="tt-val">${(node.compartments||[]).join(', ')||'NA'}</span></div>
+    <div class="tt-row"><span class="tt-key">log2FC:</span><span class="tt-val ${lfcClass}">${lfc}</span></div>
+    <div class="tt-row"><span class="tt-key">padj:</span><span class="tt-val ${sigClass}">${padj}</span></div>
+    <div class="tt-row"><span class="tt-key">−log10(padj):</span><span class="tt-val ${sigClass}">${nl10}</span></div>
+    <div class="tt-row"><span class="tt-key">Status:</span><span class="tt-val">${node.node_status}</span></div>
+  `;
+  tooltipEl.style.display = 'block';
+}
+
+document.addEventListener('mousemove', e => {
+  if (tooltipEl.style.display !== 'none') {
+    tooltipEl.style.left = (e.clientX + 16) + 'px';
+    tooltipEl.style.top  = Math.min(e.clientY + 16, window.innerHeight - 220) + 'px';
+  }
+});
+
+function onNodeClick(node) {
+  if (!node) return;
+  state.selectedNode = node;
+  const neighbors = neighborNodes[node.id] || new Set();
+  state.highlightNodes = new Set([node.id, ...neighbors]);
+  state.highlightLinks = new Set(nodeLinks[node.id] || []);
+  Graph.graphData(getGraphData());
+  // Fly camera toward node
+  const dist = 180;
+  Graph.cameraPosition(
+    { x: (node.x||0) + dist * 0.7, y: (node.y||0) + dist * 0.3, z: (node.z||0) + dist },
+    node, 800
+  );
+  showDetailPanel(node);
+}
+
+function resetHighlight() {
+  state.highlightNodes.clear();
+  state.highlightLinks.clear();
+  state.selectedNode = null;
+  if (Graph) Graph.graphData(getGraphData());
+  document.getElementById('detail-panel').style.display = 'none';
+}
+
+function showDetailPanel(node) {
+  const panel = document.getElementById('detail-panel');
+  const content = document.getElementById('detail-content');
+  panel.style.display = 'block';
+  const lfc = fmt(node.log2FC);
+  const padj = fmt(node.padj, 4);
+  const matchNote = (node.matched_as && node.matched_as !== node.id)
+    ? `<div><span class="dp-key">Matched as:</span> <span class="dp-val">${node.matched_as}</span></div>` : '';
+  const inLinks = DATA.links.filter(l => {
+    const t = typeof l.target === 'object' ? l.target.id : l.target;
+    return t === node.id;
+  });
+  const outLinks = DATA.links.filter(l => {
+    const s = typeof l.source === 'object' ? l.source.id : l.source;
+    return s === node.id;
+  });
+  function neighborRow(link, isInput) {
+    const oid = isInput
+      ? (typeof link.source === 'object' ? link.source.id : link.source)
+      : (typeof link.target === 'object' ? link.target.id : link.target);
+    const other = nodeMap[oid];
+    if (!other) return '';
+    const olfc = fmt(other.log2FC);
+    const col = other.log2FC > 0 ? '#ff8888' : (other.log2FC < 0 ? '#88aaff' : '#bbb');
+    return `<div class="neighbor-row">
+      <span>${other.label || oid}</span>
+      <span style="color:${col}">${olfc} <span style="color:#555;font-size:10px">[${link.edge_pathway}]</span></span>
+    </div>`;
+  }
+  const notes = [];
+  node.pathways.forEach(p => {
+    (DATA.pathways[p]?.validation_notes || []).forEach(n => notes.push(n));
+  });
+  const notesHtml = [...new Set(notes)].slice(0,6).map(n =>
+    `<div class="note-item">${n}</div>`).join('');
+  content.innerHTML = `
+    <h2>${node.label || node.id}</h2>
+    <div><span class="dp-key">Symbol:</span> <span class="dp-val">${node.id}</span></div>
+    ${matchNote}
+    <div><span class="dp-key">Pathways:</span> <span class="dp-val">${node.pathways.map(p=>DATA.pathways[p]?.display_name||p).join(', ')}</span></div>
+    <div><span class="dp-key">Modules:</span> <span class="dp-val">${(node.modules||[]).join(', ')||'NA'}</span></div>
+    <div><span class="dp-key">Compartments:</span> <span class="dp-val">${(node.compartments||[]).join(', ')||'NA'}</span></div>
+    <div><span class="dp-key">log2FC:</span> <span class="dp-val">${lfc}</span></div>
+    <div><span class="dp-key">padj:</span> <span class="dp-val">${padj}</span></div>
+    <div><span class="dp-key">−log10(padj):</span> <span class="dp-val">${negLog10(node.padj)}</span></div>
+    <div><span class="dp-key">Status:</span> <span class="dp-val">${node.node_status}</span></div>
+    ${inLinks.length ? `<div class="dp-section">Upstream inputs (${inLinks.length})</div>${inLinks.map(l=>neighborRow(l,true)).join('')}` : ''}
+    ${outLinks.length ? `<div class="dp-section">Downstream targets (${outLinks.length})</div>${outLinks.map(l=>neighborRow(l,false)).join('')}` : ''}
+    ${notesHtml ? `<div class="dp-section">Validation notes</div>${notesHtml}` : ''}
+  `;
+}
+
+// ============================================================
+// Update & Refresh
+// ============================================================
+let _recalcTimer = null;
+function updateGraph() {
+  if (!Graph) return;
+  // Flash "Recalculating..." in the stats bar
+  const statsEl = document.getElementById('graph-stats');
+  statsEl.textContent = 'Recalculating…';
+  statsEl.style.color = '#ffcc66';
+  clearTimeout(_recalcTimer);
+  _recalcTimer = setTimeout(() => {
+    statsEl.style.color = '';
+    Graph.graphData(getGraphData());
+    updateStats();
+  }, 80);
+}
+
+function updateStats() {
+  if (!Graph) return;
+  const gd = Graph.graphData();
+  document.getElementById('graph-stats').textContent =
+    `${(gd.nodes||[]).length} nodes · ${(gd.links||[]).length} edges`;
+}
+
+// ============================================================
+// Controls
+// ============================================================
+function buildControls() {
+  // Pathway toggles
+  const pwBox = document.getElementById('pathway-checkboxes');
+  Object.entries(DATA.pathways).forEach(([key, pdata]) => {
+    const color = PATHWAY_COLORS[key] || '#888';
+    const row = document.createElement('div');
+    row.className = 'check-row';
+    row.style.justifyContent = 'space-between';
+    row.innerHTML = `
+      <div style="display:flex;align-items:center;gap:7px;flex:1;min-width:0;">
+        <input type="checkbox" id="pw-${key}" checked>
+        <div class="pathway-dot" style="background:${color}"></div>
+        <label for="pw-${key}" class="check-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${pdata.display_name}</label>
+      </div>
+      <button class="isolate-btn" data-key="${key}"
+        style="font-size:9px;padding:2px 5px;margin-left:4px;flex-shrink:0;
+               background:rgba(40,50,120,0.6);border:1px solid rgba(100,120,200,0.3);
+               border-radius:3px;color:#aac;cursor:pointer;">only</button>
+    `;
+    row.querySelector('input').addEventListener('change', e => {
+      if (e.target.checked) state.visiblePathways.add(key);
+      else state.visiblePathways.delete(key);
+      updateGraph();
+    });
+    row.querySelector('.isolate-btn').addEventListener('click', () => isolatePathway(key));
+    pwBox.appendChild(row);
+  });
+
+  document.getElementById('btn-show-all').addEventListener('click', () => {
+    Object.keys(DATA.pathways).forEach(k => {
+      state.visiblePathways.add(k);
+      const cb = document.getElementById(`pw-${k}`);
+      if (cb) cb.checked = true;
+    });
+    updateGraph();
+  });
+
+  document.getElementById('btn-isolate-active').addEventListener('click', () => {
+    // Already reflecting checkboxes — just reheat so layout settles
+    if (Graph) Graph.d3ReheatSimulation();
+  });
+
+  // Legend pathways
+  const legPW = document.getElementById('legend-pathways');
+  legPW.innerHTML = '<div style="color:#7080c0;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Pathways</div>';
+  Object.entries(DATA.pathways).forEach(([key, pdata]) => {
+    const color = PATHWAY_COLORS[key] || '#888';
+    legPW.innerHTML += `<div class="legend-row">
+      <div style="width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0;"></div>
+      <span>${pdata.display_name}</span></div>`;
+  });
+
+  document.getElementById('filter-significant').addEventListener('change', e => {
+    state.filterSignificant = e.target.checked; updateGraph();
+  });
+  document.getElementById('filter-hubs').addEventListener('change', e => {
+    state.filterHubs = e.target.checked; updateGraph();
+  });
+  document.getElementById('toggle-labels').addEventListener('change', e => {
+    state.showLabels = e.target.checked;
+    if (Graph) { Graph.nodeThreeObject(buildNodeObject); Graph.refresh(); }
+  });
+  document.getElementById('toggle-arrows').addEventListener('change', e => {
+    state.showArrows = e.target.checked;
+    if (Graph) Graph.linkDirectionalArrowLength(e.target.checked ? 4 : 0);
+  });
+  document.getElementById('toggle-light').addEventListener('change', e => {
+    const bg = e.target.checked ? '#f4f4f8' : '#0a0a1a';
+    document.body.style.background = bg;
+    if (Graph) Graph.backgroundColor(bg);
+  });
+  document.getElementById('btn-reset-camera').addEventListener('click', resetCamera);
+  document.getElementById('btn-reheat').addEventListener('click', () => {
+    if (Graph) Graph.d3ReheatSimulation();
+  });
+  document.getElementById('close-detail').addEventListener('click', () => {
+    document.getElementById('detail-panel').style.display = 'none';
+  });
+  document.getElementById('btn-screenshot').addEventListener('click', doScreenshot);
+  document.getElementById('btn-export-csv').addEventListener('click', exportCSV);
+
+  // Search
+  document.getElementById('search-box').addEventListener('input', function() {
+    const q = this.value.trim().toLowerCase();
+    const results = document.getElementById('search-results');
+    if (!q) {
+      results.textContent = '';
+      state.searchMatches = new Set();
+      if (Graph) { Graph.nodeThreeObject(buildNodeObject); Graph.refresh(); }
+      return;
+    }
+    const matches = DATA.nodes.filter(n =>
+      n.id.toLowerCase().includes(q) ||
+      (n.label && n.label.toLowerCase().includes(q))
+    );
+    state.searchMatches = new Set(matches.map(n => n.id));
+    results.textContent = matches.length
+      ? `${matches.length} match${matches.length !== 1 ? 'es' : ''}`
+      : 'No matches';
+    if (matches.length > 0 && Graph) {
+      const first = matches[0];
+      const x = first.x || first.x_initial || 0;
+      const y = first.y || first.y_initial || 0;
+      const z = first.z || first.z_target || 0;
+      Graph.cameraPosition(
+        { x: x + 200, y: y + 80, z: z + 300 },
+        { x, y, z }, 800
+      );
+      pulseNodes(matches);
+    }
+    if (Graph) { Graph.nodeThreeObject(buildNodeObject); Graph.refresh(); }
+  });
+}
+
+// ============================================================
+// Camera
+// ============================================================
+function resetCamera() {
+  if (Graph) Graph.cameraPosition({ x: 0, y: 0, z: 1800 }, { x: 0, y: 0, z: 0 }, 1000);
+}
+
+// ============================================================
+// Keyboard
+// ============================================================
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const key = e.key.toUpperCase();
+  if (key === 'R') { resetCamera(); return; }
+  if (key === 'L') {
+    const cb = document.getElementById('toggle-labels');
+    cb.checked = !cb.checked;
+    state.showLabels = cb.checked;
+    if (Graph) { Graph.nodeThreeObject(buildNodeObject); Graph.refresh(); }
+    return;
+  }
+  if (key === 'H') {
+    const cb = document.getElementById('filter-hubs');
+    cb.checked = !cb.checked;
+    state.filterHubs = cb.checked; updateGraph(); return;
+  }
+  if (key === ' ') {
+    e.preventDefault();
+    if (!Graph) return;
+    if (state.paused) { Graph.resumeAnimation(); Graph.d3ReheatSimulation(); }
+    else { Graph.pauseAnimation(); }
+    state.paused = !state.paused; return;
+  }
+  const digit = parseInt(key);
+  if (digit >= 1 && digit <= 7 && Graph) {
+    const pwKey = PATHWAY_KEYS[digit - 1];
+    if (pwKey !== undefined) {
+      const z = LAYER_Z[pwKey] || 0;
+      Graph.cameraPosition({ x: 600, y: 200, z: z + 700 }, { x: 0, y: 0, z }, 800);
+    }
+  }
+});
+
+// ============================================================
+// Export
+// ============================================================
+function doScreenshot() {
+  if (!Graph) return;
+  Graph.renderer().render(Graph.scene(), Graph.camera());
+  const url = Graph.renderer().domElement.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url; a.download = 'pathway_network_3d.png'; a.click();
+}
+
+function exportCSV() {
+  if (!Graph) return;
+  const visNodes = Graph.graphData().nodes || [];
+  const header = 'id,label,pathways,modules,compartments,log2FC,padj,node_status,is_hub,matched_as';
+  const rows = visNodes.map(n => [
+    n.id, n.label,
+    (n.pathways||[]).join(';'),
+    (n.modules||[]).join(';'),
+    (n.compartments||[]).join(';'),
+    n.log2FC !== null && n.log2FC !== undefined ? n.log2FC : '',
+    n.padj !== null && n.padj !== undefined ? n.padj : '',
+    n.node_status,
+    n.is_hub ? 'TRUE' : 'FALSE',
+    n.matched_as || '',
+  ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+  const csv = [header, ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'pathway_network_nodes.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
+// Isolate pathway
+// ============================================================
+function isolatePathway(key) {
+  Object.keys(DATA.pathways).forEach(k => {
+    const cb = document.getElementById(`pw-${k}`);
+    if (k === key) {
+      state.visiblePathways.add(k);
+      if (cb) cb.checked = true;
+    } else {
+      state.visiblePathways.delete(k);
+      if (cb) cb.checked = false;
+    }
+  });
+  updateGraph();
+  // Fly camera to this pathway's z-layer
+  const z = LAYER_Z[key] || 0;
+  if (Graph) Graph.cameraPosition({ x: 500, y: 150, z: z + 700 }, { x: 0, y: 0, z }, 800);
+}
+
+// ============================================================
+// Search pulse animation
+// ============================================================
+function pulseNodes(matchNodes) {
+  if (!Graph) return;
+  const T = getThree();
+  if (!T) return;
+  let frame = 0;
+  const totalFrames = 40;
+  const ids = new Set(matchNodes.map(n => n.id));
+
+  function animate() {
+    frame++;
+    const t = frame / totalFrames;
+    const scale = 1 + 0.6 * Math.sin(t * Math.PI); // swell then return
+    Graph.graphData().nodes.forEach(n => {
+      if (!ids.has(n.id) || !n.__threeObj) return;
+      n.__threeObj.scale.setScalar(scale);
+    });
+    if (frame < totalFrames) requestAnimationFrame(animate);
+    else {
+      // Reset scale
+      Graph.graphData().nodes.forEach(n => {
+        if (n.__threeObj) n.__threeObj.scale.setScalar(1);
+      });
+    }
+  }
+  requestAnimationFrame(animate);
+}
+
+// ============================================================
+// Legend toggle
+// ============================================================
+function toggleLegend() {
+  const body = document.getElementById('legend-body');
+  const icon = document.getElementById('legend-toggle-icon');
+  const collapsed = body.classList.toggle('collapsed');
+  icon.textContent = collapsed ? '▼' : '▲';
+}
+
+// ============================================================
+// Boot
+// ============================================================
+window.addEventListener('load', () => {
+  const loadMsg = document.getElementById('loading-msg');
+  loadMsg.textContent = `Loading ${DATA.nodes.length} nodes, ${DATA.links.length} edges...`;
+
+  // Check libraries loaded
+  if (typeof ForceGraph3D === 'undefined') {
+    loadMsg.textContent = 'ERROR: ForceGraph3D library not loaded. Check internet connection and reload.';
+    loadMsg.style.color = '#ff6666';
+    return;
+  }
+
+  try {
+    buildControls();
+    buildGraph();
+  } catch(err) {
+    loadMsg.textContent = 'ERROR: ' + err.message;
+    loadMsg.style.color = '#ff6666';
+    console.error('buildGraph failed:', err);
+  }
+});
+</script>
+</body>
+</html>
