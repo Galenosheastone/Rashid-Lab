@@ -1,7 +1,0 @@
-input_file: "/Users/galen2/Documents/Documents_Folder/Rashid_Lab/RNAseq_Data_analysis /Claude_RNAseq/cgast_sting_package_2026-03-02/DESeq2_GRCg7b_Sacral_vs_Free_by_ENS.csv"
-input_basename: "DESeq2_GRCg7b_Sacral_vs_Free_by_ENS.csv"
-timestamp: "2026-03-02T17:13:53-0700"
-fc_column_used: "log2FC_shrunken (fallback to log2FC when NA)"
-padj_threshold: 0.05
-matched_count: 21
-total_pathway_genes: 32
